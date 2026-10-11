@@ -1,0 +1,10 @@
+node_modules/
+dist/
+server/cache/
+*.log
+.env
+.env.*
+*.rbxl
+*.rbxlx
+*.lock
+tools/bin/

@@ -1,0 +1,238 @@
+local H = require("./harness")
+local roblox = H.roblox
+local Vector3, CFrame, Color3 = roblox.Vector3, roblox.CFrame, roblox.Color3
+local Instance = roblox.Instance
+
+H.loadApi()
+local Codec = H.require("Codec")
+local Paths = H.require("Paths")
+local Build = H.require("Build")
+local Serialize = H.require("Serialize")
+local Util = H.require("Util")
+
+local check, near = H.check, H.near
+local ws = H.workspace
+
+-------------------------------------------------------------------------------
+H.section("Codec")
+
+near(Codec.decode("Vector3", { 1, 2, 3 }), Vector3.new(1, 2, 3), "vector3 array")
+check(Codec.encode(Color3.fromRGB(255, 128, 0)) == "#FF8000", "color hex encode")
+check(Codec.decode("Color3", "#ff8000") == Color3.fromRGB(255, 128, 0), "color hex decode")
+check(Codec.decode("Color3", "#f80") == Color3.fromRGB(255, 136, 0), "short hex")
+check(Codec.decode("Color3", { 10, 20, 30 }) == Color3.fromRGB(10, 20, 30), "color rgb array")
+check(Codec.decode("Color3", "Bright red") == roblox.BrickColor.new("Bright red").Color, "color by brickcolor name")
+check(not pcall(Codec.decode, "Color3", "nonsense"), "bad color errors")
+check(Codec.decode("Enum:Material", "metal") == roblox.Enum.Material.Metal, "enum case-insensitive")
+check(Codec.decode("Enum:Material", "Enum.Material.Neon") == roblox.Enum.Material.Neon, "enum full name")
+local okEnum, errEnum = pcall(Codec.decode, "Enum:Material", "Steel")
+check(not okEnum and string.find(errEnum, "Options") ~= nil, "bad enum lists options")
+
+local cf = Codec.decode("CFrame", { p = { 1, 2, 3 }, r = { 10, 45, -30 } })
+local back = Codec.encode(cf)
+check(back.p[1] == 1 and back.p[3] == 3, "cframe pos round trip")
+near(back.r[1], 10, "cframe rx")
+near(back.r[2], 45, "cframe ry")
+near(back.r[3], -30, "cframe rz")
+near(Codec.decode("CFrame", { p = { 0, 0, 0 }, lookAt = { 0, 0, -5 } }).LookVector, Vector3.new(0, 0, -1), "lookAt")
+check(Codec.encode(CFrame.new(1, 2, 3)).r == nil, "identity rotation omitted")
+
+local ns = Codec.decode("NumberSequence", { { 0, 1 }, { 1, 0 } })
+check(#ns.Keypoints == 2 and ns.Keypoints[2].Value == 0, "number sequence")
+local cs = Codec.decode("ColorSequence", { "#ff0000", "#0000ff" })
+check(cs.Keypoints[1].Value == Color3.new(1, 0, 0), "color sequence 2-stop")
+check(Codec.decode("UDim2", { 0.5, 10, 1, -20 }) == roblox.UDim2.new(0.5, 10, 1, -20), "udim2")
+local f = Codec.decode("Font", { family = "GothamSSm", weight = "Bold" })
+check(f.Weight == roblox.Enum.FontWeight.Bold, "font weight")
+check(Codec.encode(f).family == "GothamSSm", "font family short")
+check(Codec.decode("bool", "true") == true, "bool")
+check(Codec.decode("ContentId", 123) == "rbxassetid://123", "content id from number")
+check(Codec.round(1 / 3) == 0.3333, "rounding")
+
+check(Codec.decodeAttr({ Color3 = "#00ff00" }) == Color3.new(0, 1, 0), "typed attr")
+check(Codec.decodeAttr(5) == 5, "plain attr")
+check(Codec.encodeAttr(Vector3.new(1, 2, 3)).Vector3[2] == 2, "attr encode wrap")
+
+-------------------------------------------------------------------------------
+H.section("Util.base64")
+
+local raw = "hello\0world\255!"
+local b = roblox and buffer.fromstring(raw)
+local enc = Util.base64Encode(b)
+check(enc == "aGVsbG8Ad29ybGT/IQ==", "base64 encode " .. enc)
+check(buffer.tostring(Util.base64Decode(enc)) == raw, "base64 round trip")
+for len = 0, 7 do
+	local s = string.rep("x", len)
+	check(buffer.tostring(Util.base64Decode(Util.base64Encode(buffer.fromstring(s)))) == s, "base64 len " .. len)
+end
+
+-------------------------------------------------------------------------------
+H.section("Build: frames, repeat, mirror, span, refs")
+
+local spec = {
+	class = "Model",
+	name = "Generator",
+	origin = { p = { 10, 0, 5 }, r = { 0, 90, 0 } },
+	primary = "Base",
+	attrs = { Tier = 2, Glow = { Color3 = "#ffaa00" } },
+	tags = { "Machine" },
+	children = {
+		{ name = "Base", size = { 8, 1, 6 }, at = { 0, 0.5, 0 }, color = "#3a3f47", material = "DiamondPlate" },
+		{ name = "Body", size = { 6, 4, 4 }, at = { 0, 3, 0 }, color = "#c8a23a", material = "Metal",
+			children = {
+				{ class = "Attachment", name = "Out", at = { 3, 0, 0 } },
+				{ class = "PointLight", name = "Lamp", Brightness = 2, Range = 12, Color = "#ffcc66" },
+			} },
+		{ name = "Leg%d", size = { 1, 1, 1 }, at = { 3, 0.5, 2 }, mirror = { "x", "z" } },
+		{ name = "Fin%d", size = { 0.2, 3, 4 }, at = { -2.5, 3, 0 }, ["repeat"] = { count = 6, step = { 1, 0, 0 } } },
+		{ name = "Pipe", shape = "Cylinder", span = { { 3, 5, 0 }, { 3, 5, 10 } }, thickness = 1, color = "#888888" },
+		{ class = "WeldConstraint", name = "W", Part0 = { ref = "./Base" }, Part1 = { ref = "./Body" } },
+		{ name = "Bad", size = { 1, 1, 1 }, Colour = "#ff0000", Transparency = "abc" },
+	},
+}
+
+local res = Build.run(ws, { spec }, {})
+local model = res.created[1]
+check(model and model.Name == "Generator", "model created")
+check(model.Parent == ws, "parented")
+check(model.PrimaryPart and model.PrimaryPart.Name == "Base", "primary part set")
+
+local origin = CFrame.new(10, 0, 5) * CFrame.fromOrientation(0, math.rad(90), 0)
+near(model:GetPivot(), origin, "model pivot = origin")
+local base = model:FindFirstChild("Base")
+near(base.CFrame.Position, origin * Vector3.new(0, 0.5, 0), "base position in model frame")
+check(base.Anchored == true, "builder anchors parts")
+check(base.Material == roblox.Enum.Material.DiamondPlate, "material shorthand")
+check(Codec.hex(base.Color) == "#3A3F47", "color shorthand")
+-- rotated frame: local +X maps to world -Z when yaw is 90°
+local body = model:FindFirstChild("Body")
+local att = body:FindFirstChild("Out")
+near(att.CFrame.Position, Vector3.new(3, 0, 0), "attachment stays local to its part")
+check(body:FindFirstChild("Lamp").Range == 12, "PascalCase prop on node")
+check(Codec.hex(body:FindFirstChild("Lamp").Color) == "#FFCC66", "light color")
+
+local legs = {}
+for _, c in model:GetChildren() do
+	if c.Name == "Leg1" then
+		table.insert(legs, c)
+	end
+end
+check(#legs == 4, "mirror x,z gives 4 legs (got " .. #legs .. ")")
+local seen = {}
+for _, l in legs do
+	local lp = origin:PointToObjectSpace(l.CFrame.Position)
+	seen[string.format("%d,%d", math.round(lp.X), math.round(lp.Z))] = true
+end
+check(seen["3,2"] and seen["-3,2"] and seen["3,-2"] and seen["-3,-2"], "legs at mirrored corners")
+
+local fins = 0
+for i = 1, 6 do
+	local fin = model:FindFirstChild("Fin" .. i)
+	if fin then
+		fins += 1
+		near(origin:PointToObjectSpace(fin.CFrame.Position), Vector3.new(-2.5 + (i - 1), 3, 0), "fin " .. i .. " position")
+	end
+end
+check(fins == 6, "6 fins")
+
+local pipe = model:FindFirstChild("Pipe")
+near(pipe.Size, Vector3.new(10, 1, 1), "cylinder span size along X")
+near(pipe.CFrame.Position, origin * Vector3.new(3, 5, 5), "span midpoint")
+local axis = pipe.CFrame.RightVector -- cylinder axis
+local want = (origin * Vector3.new(3, 5, 10) - origin * Vector3.new(3, 5, 0)).Unit
+check(math.abs(axis:Dot(want)) > 0.999, "cylinder axis follows span")
+
+local w = model:FindFirstChild("W")
+check(w.Part0 == base and w.Part1 == body, "relative refs resolved")
+check(model:GetAttribute("Tier") == 2, "number attr")
+check(model:GetAttribute("Glow") == Color3.fromRGB(255, 170, 0), "typed attr")
+check(model:HasTag("Machine"), "tag")
+
+local sawColour, sawTransp = false, false
+for _, wmsg in res.warnings do
+	if string.find(wmsg, "Colour", 1, true) and string.find(wmsg, "did you mean", 1, true) then
+		sawColour = true
+	end
+	if string.find(wmsg, "Transparency", 1, true) then
+		sawTransp = true
+	end
+end
+check(sawColour, "unknown prop warns with suggestion")
+check(sawTransp, "bad value warns")
+
+-------------------------------------------------------------------------------
+H.section("Serialize round trip")
+
+local node = Serialize.node(model, {})
+check(node.class == "Model" and node.origin ~= nil, "root model has origin")
+check(node.primary == "Base", "primary serialized")
+local json = H.serde.encode("json", node)
+local node2 = H.serde.decode("json", json)
+node2.name = "Generator2"
+local res2 = Build.run(ws, { node2 }, {})
+local model2 = res2.created[1]
+check(#res2.warnings == 0, "rebuild has no warnings: " .. table.concat(res2.warnings, " | "))
+
+local function partsByPath(m)
+	local out = {}
+	for _, d in m:GetDescendants() do
+		out[Paths.relative(d, m)] = d
+	end
+	return out
+end
+local a, bb = partsByPath(model), partsByPath(model2)
+local compared = 0
+for path, inst in a do
+	local other = bb[path]
+	check(other ~= nil, "rebuilt has " .. path)
+	if other and inst:IsA("BasePart") then
+		compared += 1
+		near(inst.CFrame, other.CFrame, path .. " cframe")
+		near(inst.Size, other.Size, path .. " size")
+		check(inst.Color == other.Color, path .. " color")
+		check(inst.Material == other.Material, path .. " material")
+		check(inst.Shape == other.Shape or not inst:IsA("Part"), path .. " shape")
+	end
+end
+check(compared >= 10, "compared parts: " .. compared)
+check(model2:FindFirstChild("W").Part0 == model2:FindFirstChild("Base"), "refs survive round trip")
+near(model2:GetPivot(), model:GetPivot(), "pivot survives round trip")
+
+-------------------------------------------------------------------------------
+H.section("Paths")
+
+local dup = Instance.new("Folder")
+dup.Name = "Dups"
+dup.Parent = ws
+for i = 1, 3 do
+	local p = Instance.new("Part")
+	p.Name = "Wall"
+	p.Parent = dup
+end
+local second = dup:GetChildren()[2]
+check(Paths.of(second) == "Workspace/Dups/Wall[2]", "indexed path " .. Paths.of(second))
+check(Paths.resolve("Workspace/Dups/Wall[2]") == second, "resolve indexed")
+check(Paths.resolve("Workspace.Dups") == dup, "dotted path")
+check(Paths.resolve("#" .. Paths.id(second)) == second, "id path")
+check(Paths.resolve("Workspace/Generator/Body/Out") == att, "deep path")
+check(not pcall(Paths.resolveMany, { "Workspace/Nope" }), "missing path errors")
+
+-------------------------------------------------------------------------------
+H.section("Build: replace + defaults")
+
+Build.run(ws, { { name = "Box", size = { 2, 2, 2 } } }, {})
+Build.run(ws, { { name = "Box", size = { 3, 3, 3 } } }, { replace = true, defaults = { material = "Wood" } })
+local boxes = 0
+for _, c in ws:GetChildren() do
+	if c.Name == "Box" then
+		boxes += 1
+		near(c.Size, Vector3.new(3, 3, 3), "replaced box size")
+		check(c.Material == roblox.Enum.Material.Wood, "defaults.material applied")
+	end
+end
+check(boxes == 1, "replace leaves one box")
+
+local top = Build.run(ws, { { name = "Shifted", size = { 1, 1, 1 }, at = { 1, 0, 0 } } }, { origin = { p = { 100, 0, 0 } } })
+near(top.created[1].CFrame.Position, Vector3.new(101, 0, 0), "build origin offsets top-level items")
+
+H.done()
