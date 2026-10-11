@@ -162,14 +162,28 @@ function View.frame(args)
 	local dir, up = fn(basisOf(targets))
 	local vp = cam.ViewportSize
 	local aspect = (vp.Y > 0) and (vp.X / vp.Y) or (16 / 9)
-	local vfov = math.rad(cam.FieldOfView)
-	local hfov = 2 * math.atan(math.tan(vfov / 2) * aspect)
-	local radius = math.max(b.size.Magnitude / 2, 0.5)
-	local dist = radius / math.sin(math.min(vfov, hfov) / 2) * (tonumber(args.distance) or 1) * 0.92
-	local pos = b.center + dir * dist
+	local tv = math.tan(math.rad(cam.FieldOfView) / 2)
+	local th = tv * aspect
 	if math.abs(dir:Dot(up)) > 0.999 then
 		up = Vector3.zAxis
 	end
+	-- fit the 8 box corners: camera at center + dir*d looking along f = -dir;
+	-- a corner offset q has depth d + q·f and must satisfy |q·r| <= depth*th, |q·u| <= depth*tv
+	local look = CFrame.lookAt(Vector3.zero, -dir, up)
+	local r, u, f = look.RightVector, look.UpVector, look.LookVector
+	local half = b.size / 2
+	local need = 0
+	for _, sx in { -1, 1 } do
+		for _, sy in { -1, 1 } do
+			for _, sz in { -1, 1 } do
+				local q = Vector3.new(half.X * sx, half.Y * sy, half.Z * sz)
+				local qf = q:Dot(f)
+				need = math.max(need, math.abs(q:Dot(r)) / th - qf, math.abs(q:Dot(u)) / tv - qf, -qf + 0.5)
+			end
+		end
+	end
+	local dist = math.max(need * 1.1, 2) * (tonumber(args.distance) or 1)
+	local pos = b.center + dir * dist
 	cam.CFrame = CFrame.lookAt(pos, b.center, up)
 	cam.Focus = CFrame.new(b.center)
 end

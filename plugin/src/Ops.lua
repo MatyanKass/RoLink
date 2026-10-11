@@ -222,8 +222,22 @@ function Ops.get(args)
 	}
 end
 
+local INTERNAL_SERVICES = {
+	CoreGui = true, PluginGuiService = true, PluginDebugService = true, CorePackages = true,
+	RobloxPluginGuiService = true, StudioService = true, PluginManagementService = true,
+}
+
 function Ops.find(args)
 	local roots = args.root and Paths.resolveMany(args.root) or { workspace }
+	if #roots == 1 and roots[1] == game then
+		-- the whole place, minus Studio's own UI/internals
+		roots = {}
+		for _, svc in game:GetChildren() do
+			if not INTERNAL_SERVICES[svc.ClassName] then
+				table.insert(roots, svc)
+			end
+		end
+	end
 	local limit = args.limit or 100
 	local nameQ = args.name and string.lower(args.name)
 	local namePattern = nameQ and string.sub(nameQ, 1, 1) == "^"
