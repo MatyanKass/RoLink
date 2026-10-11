@@ -8,7 +8,12 @@
   "scripts": {
     "build": "tsc -p .",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p . --noEmit"
+    "typecheck": "tsc -p . --noEmit",
+    "serve": "node dist/index.js --daemon",
+    "test": "node test/e2e.mjs",
+    "plugin:build": "node ../plugin/build.mjs",
+    "plugin:install": "node ../plugin/build.mjs --install",
+    "test:plugin": "cd ../plugin/tests && ../../tools/bin/lune.exe run run.luau"
   },
   "engines": {
     "node": ">=20"
