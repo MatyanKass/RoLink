@@ -466,14 +466,23 @@ export class MirrorSession {
     }
   }
 
-  private async atomicWrite(rel: string, text: string) {
+  /**
+   * `mayReplace` runs synchronously right before the rename, so nothing in this process can
+   * slip between it and the rename, and an outside writer has only a sub-millisecond window.
+   * Returns false, leaving the target alone, when it says no.
+   */
+  private async atomicWrite(rel: string, text: string, mayReplace?: () => boolean) {
     const tmp = path.join(this.root, TMP_DIR, randomUUID());
     await fsp.writeFile(tmp, text, "utf8");
     const target = this.abs(rel);
     for (let i = 0; ; i++) {
+      if (mayReplace && !mayReplace()) {
+        await fsp.rm(tmp, { force: true });
+        return false;
+      }
       try {
-        await fsp.rename(tmp, target);
-        return;
+        fs.renameSync(tmp, target);
+        return true;
       } catch (e: any) {
         if (i >= 6 || !["EPERM", "EBUSY", "EACCES"].includes(e.code)) {
           await fsp.rm(tmp, { force: true });
@@ -536,18 +545,24 @@ export class MirrorSession {
         writes.slice(i, i + 32).map(async ([rel, text, h]) => {
           try {
             await this.assertNoSymlink(dirOf(rel), checked);
-            // an agent saved this file since we last wrote it: its edit wins, the watcher brings it in
             const known = this.diskFiles.get(rel);
-            if (known !== undefined) {
-              const now = await fsp.readFile(this.abs(rel), "utf8").catch(() => null);
-              if (now !== null && sha(now) !== known) {
-                this.pending.add(rel);
-                this.schedule();
-                return;
+            const replaced = await this.atomicWrite(rel, text, () => {
+              if (known !== undefined) {
+                let now: string | null = null;
+                try {
+                  now = fs.readFileSync(this.abs(rel), "utf8");
+                } catch {}
+                if (now !== null && sha(now) !== known) return false;
               }
+              this.diskFiles.set(rel, h); // before the rename, so its watcher event is recognised
+              return true;
+            });
+            if (!replaced) {
+              // an agent saved this file since we last wrote it: its edit wins, the watcher brings it in
+              this.diskFiles.set(rel, known!);
+              this.pending.add(rel);
+              this.schedule();
             }
-            this.diskFiles.set(rel, h); // before the write, so its watcher event is recognised
-            await this.atomicWrite(rel, text);
           } catch (e: any) {
             this.diskFiles.delete(rel);
             this.logError(`could not write ${rel}: ${e.message}`);

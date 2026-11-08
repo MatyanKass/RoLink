@@ -1,6 +1,7 @@
 // The live mirror against a fake Studio on a real disk. Build first: `npm run build`.
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -210,6 +211,33 @@ test("new script, part in model.json, loose object, and owned object are created
     fs.writeFileSync(f("Workspace", "Tower.model", "model.json"), JSON.stringify(doc));
     await until(() => studio.find("Roof"), "new part");
     await until(() => read("Workspace", "Tower.model", "model.json").includes('"Roof"'), "rendered");
+  }));
+
+test("an agent edit landing while a render is writing the same file is not overwritten", () =>
+  withMirror(async ({ m, studio, f, read }) => {
+    const file = f("Workspace", "Tower.model", "model.json");
+    const original = fsp.writeFile;
+    let edited = false;
+    // the render writes its temp file, then renames it over the target: the agent saves in between
+    fsp.writeFile = async function (p, text, ...rest) {
+      const r = await original.call(this, p, text, ...rest);
+      if (!edited && String(p).includes(".rolink-tmp") && String(text).includes("#445566")) {
+        edited = true;
+        const doc = JSON.parse(read("Workspace", "Tower.model", "model.json"));
+        doc.children.push({ name: "Roof", class: "Part", CFrame: CF(30), Size: [2, 2, 2] });
+        fs.writeFileSync(file, JSON.stringify(doc));
+      }
+      return r;
+    };
+    try {
+      const door = studio.find("Door");
+      door.props.Color = "#445566";
+      m.onDelta({ upserts: [studio.wire(door.i)] });
+      await until(() => edited, "the render reached its write");
+      await until(() => studio.find("Roof"), "the agent's edit reached Studio");
+    } finally {
+      fsp.writeFile = original;
+    }
   }));
 
 test("a GUI directory under StarterGui creates the whole tree, class from gui.json", () =>
