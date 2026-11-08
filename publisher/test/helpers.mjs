@@ -13,6 +13,9 @@ export const RU_AUDIO = "Я согласен на публикацию звук�
 export const RU_IMAGE = "Я согласен на публикацию картинок";
 export const EN_AUDIO = "I agree to publish sounds";
 export const EN_IMAGE = "I agree to publish images";
+export const RU_ANIMATION = "Я согласен на публикацию анимаций";
+export const EN_ANIMATION = "I agree to publish animations";
+export const RBXM = Buffer.from("<roblox!\x89\xff\r\n\x1a\n\0\0animation", "latin1");
 
 export function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "rolink-pub-"));
@@ -149,6 +152,20 @@ export function fakeCloud() {
     moderation: { moderationState: "Reviewing" },
     placeResponse: () => json(200, { versionNumber: 12 }),
     throwWith: undefined,
+    grants: [],
+    /** default: Roblox reports every requested asset as granted */
+    grantResponse: (body) => json(200, { successAssetIds: body.requests.map((r) => r.assetId), errors: [] }),
+    quotaPages: [{ assetQuotas: [{ path: "users/42/asset-quotas/a", quotaType: "RateLimitUpload", assetType: "Audio", usage: 3, capacity: 10, period: "Month" }] }],
+    quotaRequests: [],
+    quotaResponse: undefined,
+    restarts: [],
+    restartResponse: () => json(200, { done: true }),
+    /** "store/scope/key" -> entry; scope is "-" for the unscoped path */
+    entries: new Map(),
+    stores: ["Coins", "Saves"],
+    patches: [],
+    deletes: [],
+    dsResponse: undefined,
   };
   cloud.fetch = async (url, init = {}) => {
     const u = new URL(String(url));
@@ -175,6 +192,50 @@ export function fakeCloud() {
     if (rec.method === "POST" && place) {
       cloud.placeUploads.push({ universeId: place[1], placeId: place[2], versionType: u.searchParams.get("versionType"), contentType: rec.contentType, bytes: Buffer.from(init.body) });
       return cloud.placeResponse();
+    }
+    if (rec.method === "PATCH" && u.pathname === "/asset-permissions-api/v1/assets/permissions") {
+      const body = JSON.parse(init.body);
+      cloud.grants.push({ body, contentType: rec.contentType, key: rec.key });
+      return cloud.grantResponse(body);
+    }
+    if (rec.method === "GET" && /^\/cloud\/v2\/users\/\d+\/asset-quotas$/.test(u.pathname)) {
+      cloud.quotaRequests.push({ userId: u.pathname.split("/")[4], filter: u.searchParams.get("filter"), pageToken: u.searchParams.get("pageToken"), maxPageSize: u.searchParams.get("maxPageSize") });
+      if (cloud.quotaResponse) return cloud.quotaResponse();
+      const page = cloud.quotaPages[Number(u.searchParams.get("pageToken") ?? 0)];
+      return json(200, page ?? { assetQuotas: [] });
+    }
+    const restart = /^\/cloud\/v2\/universes\/(\d+):restartServers$/.exec(u.pathname);
+    if (rec.method === "POST" && restart) {
+      cloud.restarts.push({ universeId: restart[1], body: JSON.parse(init.body), contentType: rec.contentType });
+      return cloud.restartResponse();
+    }
+    const ds = /^\/cloud\/v2\/universes\/(\d+)\/data-stores(?:\/([^/]+)(?:\/scopes\/([^/]+))?\/entries(?:\/([^/]+))?)?$/.exec(u.pathname);
+    if (ds) {
+      if (cloud.dsResponse) return cloud.dsResponse(rec);
+      const [, , store, scope, key] = ds;
+      if (!store) return json(200, { dataStores: cloud.stores.filter((s) => s.startsWith(/"(.*)"/.exec(u.searchParams.get("filter") ?? "")?.[1] ?? "")).map((id) => ({ id, path: `x/${id}` })), nextPageToken: "" });
+      if (!key) {
+        const prefix = `${decodeURIComponent(store)}/${scope ? decodeURIComponent(scope) : "-"}/`;
+        const keys = [...cloud.entries.keys()].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+        return json(200, { dataStoreEntries: keys.map((id) => ({ id, path: `x/${id}` })), nextPageToken: "" });
+      }
+      const id = `${decodeURIComponent(store)}/${scope ? decodeURIComponent(scope) : "-"}/${decodeURIComponent(key)}`;
+      const cur = cloud.entries.get(id);
+      if (rec.method === "GET") return cur ? json(200, cur) : json(404, { message: "not found" });
+      if (rec.method === "PATCH") {
+        const body = JSON.parse(init.body);
+        cloud.patches.push({ id, body, allowMissing: u.searchParams.get("allowMissing"), url: u });
+        if (!cur && u.searchParams.get("allowMissing") !== "true") return json(404, { message: "not found" });
+        const next = { id: decodeURIComponent(key), state: "ACTIVE", revisionId: `r${cloud.patches.length + 1}`, ...body };
+        cloud.entries.set(id, next);
+        return json(200, next);
+      }
+      if (rec.method === "DELETE") {
+        cloud.deletes.push({ id });
+        if (!cur) return json(404, { message: "not found" });
+        cloud.entries.delete(id);
+        return json(200, {});
+      }
     }
     return json(404, { message: `no fake route ${rec.method} ${u.pathname}` });
   };
@@ -237,6 +298,7 @@ export async function fakeRoLink({ online = true } = {}) {
         return { text: JSON.stringify({ updated: args.edits.length, warnings: [] }) };
       }
       case "confirm_dialog":
+        rl.onDialog?.();
         return { text: JSON.stringify(rl.dialog) };
     }
     throw new Error(`unknown tool ${tool}`);

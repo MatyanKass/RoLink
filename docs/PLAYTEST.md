@@ -21,6 +21,23 @@ If `playtest_start` says it cannot start the test, ask the user to press Play
 (F5) or Run (F8) and call `playtest_status` until `running` is true; all the
 other tools then work the same way.
 
+## Several players
+
+`multiplayer_test {clients}` starts one server and 1 to 8 client windows on this
+PC. Everything above works the same way: `playtest_status` shows mode
+`multiplayer` and the number of clients, `playtest_scenario` runs on the server
+by default, and `playtest_stop` ends it. To work with one window, pass
+`context: "client"` and `client: 2`, numbered in the order they joined, to
+`playtest_scenario` or `output_read`. On the server, `T.players(2)` waits for two
+players to join and returns them.
+
+## Performance
+
+`profile_scripts {duration}` runs the Script Profiler during a test and returns
+the functions that took the most time. It runs alongside a scenario, so start the
+profile first and drive the load from the scenario. `perf_stats` returns memory,
+counts and heartbeat for any context at any time.
+
 ## Example
 
 ```lua
@@ -42,6 +59,7 @@ end)
 | Helper | What it does |
 | --- | --- |
 | `T.player(timeout?)` | The test's player (`LocalPlayer` on the client); waits for one to join. Errors in mode `run`, which has no players. |
+| `T.players(minCount?, timeout?)` | Every player in the test. With `minCount`, waits until that many have joined (default 10 s), and errors if they do not. |
 | `T.character(timeout?)` | The player's character; waits for it to spawn. |
 | `T.teleport(cframeOrVector)` | Moves the character. A `Vector3` keeps its facing. |
 | `T.wait(seconds?)` | `task.wait`. |

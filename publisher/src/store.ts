@@ -25,6 +25,8 @@ export interface Prepared {
   target?: Target;
   copyright: CopyrightResult;
   acceptedPhrases: string[];
+  /** Experience that gets Use access after the upload, as shown in the summary. */
+  universeId?: number;
   createdAt: number;
   usedAt?: number;
 }
@@ -45,6 +47,9 @@ export interface QueueEntry {
   /** Studio this entry belongs to, fixed the first time one is seen. */
   place?: string;
   placeholder?: { created: boolean; error?: string; note?: string };
+  universeId?: number;
+  /** Use access for that experience; pending entries are retried by the poller. */
+  grant?: { status: "pending" | "granted" | "failed"; error?: string };
   createdAt: number;
   updatedAt: number;
 }

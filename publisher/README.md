@@ -45,6 +45,7 @@ Or in a JSON config:
 | `ROBLOX_CREATOR_USER_ID` or `ROBLOX_CREATOR_GROUP_ID` | Who owns uploaded assets. If both are set, the group is used. |
 | `AUDD_API_TOKEN` | Optional: copyright check through AudD. |
 | `ACRCLOUD_HOST`, `ACRCLOUD_ACCESS_KEY`, `ACRCLOUD_ACCESS_SECRET` | Optional: copyright check through ACRCloud. |
+| `ROBLOX_UNIVERSE_ID` | Optional: experience that gets Use access to uploads (see below). |
 | `ROLINK_PORT` | RoLink's port, if not the default 34872. |
 | `ROLINK_PUBLISH_STATE_DIR` | Overrides where the queue is stored. |
 
@@ -58,6 +59,15 @@ Create the key at [Creator Dashboard > Open Cloud > API Keys](https://create.rob
 | --- | --- |
 | Sounds and images | **assets**: Read and Write (`asset:read`, `asset:write`) |
 | `place_save` / `place_publish` | **universe-places**: Write (`universe-places:write`), **only for the one experience** you want to publish. Leave it out if you do not want this. |
+| Experience access after upload | **asset-permissions**: Write (`asset-permissions:write`). Without it uploads still work, and `publish_status` reports the failed grant. |
+| `asset_quota` | **assets**: Read (`asset:read`) |
+| `server_restart` | **universe**: Write (`universe:write`), only for that experience |
+| `datastore_list` | `universe-datastores.control:list` for the list of stores, `universe-datastores.objects:list` for keys |
+| `datastore_get` | `universe-datastores.objects:read` |
+| `datastore_set` | `universe-datastores.objects:read` and `universe-datastores.objects:update` (the entry is read first) |
+| `datastore_delete` | `universe-datastores.objects:read` and `universe-datastores.objects:delete` |
+
+If a permission is missing, the tool's error names it.
 
 A leaked key with place permission can overwrite that experience, so keep it out of keys that do not need it. A key made under your personal account cannot manage group assets.
 
@@ -71,11 +81,26 @@ Be careful which experiences you select for **assets** Write as well. Roblox's c
 | --- | --- |
 | `prepare_asset {path, kind, name, description?, target?}` | Validates the file, computes SHA-256, runs the copyright check, returns a `prepareId`, a summary and the exact phrase. Uploads nothing. |
 | `publish_asset {prepareId, confirmation}` | Uploads if the phrase matches and the file has not changed. Each `prepareId` works once. |
-| `publish_status {prepareId?}` | Lists the queue: moderation state, placeholder state, rejection reason. |
+| `publish_animation {prepareId, confirmation}` | Same as `publish_asset`, for a `kind: "animation"` prepare of a binary `.rbxm`. |
+| `publish_status {prepareId?}` | Lists the queue: moderation state, placeholder state, experience access, rejection reason. |
+| `asset_quota {userId?, assetType?, quotaType?}` | Reads usage, capacity and remaining count from Roblox. Roblox documents this per user. |
 | `place_save {universeId, placeId, file}` | Uploads a new Saved version. Players do not get it. No confirmation. |
 | `place_publish {universeId, placeId, file}` | Uploads and publishes after a confirmation dialog in Studio. |
+| `server_restart {universeId}` | Restarts servers on an older place version, after a confirmation dialog in Studio. |
+| `datastore_list {universeId, store?, scope?, prefix?, limit?, pageToken?}` | Lists data stores, or the keys in one. No confirmation. |
+| `datastore_get {universeId, store, key, scope?}` | Reads one entry. No confirmation. |
+| `datastore_set {universeId, store, key, value, scope?, users?, attributes?, create?}` | Writes one entry after a confirmation dialog in Studio showing the current and new value. |
+| `datastore_delete {universeId, store, key, scope?}` | Deletes one entry after a confirmation dialog in Studio. There is no bulk delete tool. |
 
 There is deliberately **no tool that changes experience privacy or makes a game public**.
+
+### Experience access
+
+Roblox can refuse to play an asset in an experience that has no permission to use it. After an upload is accepted, this server grants the experience **Use** access through the asset-permissions API. The experience is, in order: `universeId` passed to `prepare_asset`, `ROBLOX_UNIVERSE_ID`, or the published experience open in Studio. The summary names it before you agree. A rejected asset is not granted; a rate-limited grant is retried in the background.
+
+### Data stores
+
+Open Cloud's v2 update has no partial update and clears fields left out of the request. `datastore_set` guards against that by reading the entry first and sending its `users` and `attributes` again unless you pass your own; `value` is always the whole new value. It refuses if the entry changed while the dialog was open, and a key containing `@` is refused for writes because it addresses a revision.
 
 ### Confirmation phrases
 
@@ -83,11 +108,12 @@ There is deliberately **no tool that changes experience privacy or makes a game 
 | --- | --- |
 | Sound | `Я согласен на публикацию звуков` or `I agree to publish sounds` |
 | Image | `Я согласен на публикацию картинок` or `I agree to publish images` |
+| Animation | `Я согласен на публикацию анимаций` or `I agree to publish animations` |
 | Sound matching a known track | `Я подтверждаю публикацию: <title>` or `I confirm publishing: <title>` |
 
 **The phrase is an agreement step, not a security boundary.** Tool descriptions tell the agent to show you the summary and wait for you to type it, but the server cannot tell who typed the text. It stops mistakes and makes the decision explicit; it does not stop an agent that ignores its instructions. Anything that can reach your key can publish.
 
-The same goes for the Studio dialog on `place_publish`: it is a real button press and cannot be answered through this server, but an agent with RoLink's `run` tool executes code inside Studio and could in principle script it. Treat it as protection against accidents.
+The same goes for the Studio dialog on `place_publish`, `server_restart`, `datastore_set` and `datastore_delete`: it is a real button press and cannot be answered through this server, but an agent with RoLink's `run` tool executes code inside Studio and could in principle script it. Treat it as protection against accidents.
 
 A failed upload still spends its `prepareId`, because the outcome of a failed request can be unclear. Call `prepare_asset` again to retry.
 

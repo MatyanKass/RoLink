@@ -13,6 +13,8 @@ export interface Creator {
 export interface PublishConfig {
   apiKey?: string;
   creator?: Creator;
+  /** Experience that uploads get Use access to, when prepare_asset names none. */
+  universeId?: number;
 }
 
 /** The key lives only in this process: it is read here and handed to OpenCloud. */
@@ -21,7 +23,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): PublishConfig {
   const groupId = env.ROBLOX_CREATOR_GROUP_ID?.trim() || undefined;
   const userId = env.ROBLOX_CREATOR_USER_ID?.trim() || undefined;
   const creator = groupId ? { groupId } : userId ? { userId } : undefined;
-  return { apiKey, creator };
+  const universeId = Number(env.ROBLOX_UNIVERSE_ID?.trim() || NaN);
+  return { apiKey, creator, universeId: Number.isSafeInteger(universeId) && universeId > 0 ? universeId : undefined };
 }
 
 /** The user's config directory, so the queue survives reboots and temp cleaners. */

@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-export type AssetKind = "audio" | "image";
+export type AssetKind = "audio" | "image" | "animation";
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const MAX_AUDIO_SECONDS = 7 * 60;
@@ -15,6 +15,9 @@ export const MAX_IMAGE_SIDE = 8000;
 
 const AUDIO: Record<string, string> = { ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav", ".flac": "audio/flac" };
 const IMAGE: Record<string, string> = { ".png": "image/png", ".jpeg": "image/jpeg", ".jpg": "image/jpeg", ".bmp": "image/bmp", ".tga": "image/tga" };
+/** The guide also lists .rbxmx, but a report of a 400 for it keeps this to the binary format. */
+const ANIMATION: Record<string, string> = { ".rbxm": "model/x-rbxm" };
+const ALLOWED: Record<AssetKind, Record<string, string>> = { audio: AUDIO, image: IMAGE, animation: ANIMATION };
 
 export interface MediaInfo {
   file: string;
@@ -35,7 +38,7 @@ export function sha256(data: Buffer): string {
 export async function inspectMedia(file: string, kind: AssetKind): Promise<MediaInfo> {
   if (!path.isAbsolute(file)) throw new Error(`Path must be absolute: ${file}`);
   const ext = path.extname(file).toLowerCase();
-  const allowed = kind === "audio" ? AUDIO : IMAGE;
+  const allowed = ALLOWED[kind];
   const contentType = allowed[ext];
   if (!contentType) throw new Error(`Extension "${ext}" is not supported for ${kind}. Allowed: ${Object.keys(allowed).join(", ")}`);
 
@@ -45,7 +48,9 @@ export async function inspectMedia(file: string, kind: AssetKind): Promise<Media
 
   const data = await fsp.readFile(file);
   const info: MediaInfo = { file, ext, sizeBytes: data.length, sha256: sha256(data), contentType, data };
-  if (kind === "audio") {
+  if (kind === "animation") {
+    if (data.toString("latin1", 0, 8) !== "<roblox!") throw new Error(`${path.basename(file)} does not look like a binary .rbxm file.`);
+  } else if (kind === "audio") {
     info.durationSeconds = audioDuration(data, ext);
     if (info.durationSeconds > MAX_AUDIO_SECONDS) {
       throw new Error(`Audio is ${info.durationSeconds.toFixed(1)} s long; Roblox allows up to 7 minutes (${MAX_AUDIO_SECONDS} s).`);
