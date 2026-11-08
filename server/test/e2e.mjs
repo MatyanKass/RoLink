@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Document, NodeIO } from "@gltf-transform/core";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 34999;
@@ -23,7 +24,7 @@ const ok = (cond, msg) => {
 
 async function client() {
   const c = new Client({ name: "e2e", version: "0" });
-  await c.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env: { ...process.env, ROLINK_PORT: String(PORT) }, stderr: "ignore" }));
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env: { ...process.env, ROLINK_PORT: String(PORT), ROBLOX_API_KEY: "" }, stderr: "ignore" }));
   return c;
 }
 const text = (r) => r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
@@ -51,6 +52,22 @@ function handle(cmd) {
       return { created: [{ path: "Workspace/" + cmd.args.items[0].name, id: 9, class: "Model" }], warnings: [], parts: 1, big: "x".repeat(5000) };
     case "boom":
       throw "kaboom";
+    case "toolbox_search":
+      return { results: [{ id: 7, name: "Tree", creator: "Maker" }] };
+    case "toolbox_insert":
+      return {
+        assetId: cmd.args.assetId, name: "Tree", creator: { id: 1, name: "Maker" }, path: `ServerStorage/RoLinkQuarantine/Tree_${cmd.args.assetId}`, loader: "LoadAsset",
+        counts: { instances: 3, parts: 1 }, assetRefs: [], uncheckedRefs: 0,
+        scripts: [{ path: "Main", name: "Main", class: "Script", enabled: false, wasEnabled: true, runContext: "Legacy", parentClass: "Model", source: "require(1234567)" }],
+      };
+    case "toolbox_release":
+      return { moved: { path: "Workspace/Tree", id: 3, class: "Model" }, enabled: 0, disabled: 1, unknownScripts: 0 };
+    case "animation_stage":
+      return { staged: cmd.args.index };
+    case "animation_build":
+      return { created: { path: "ServerStorage/RoLinkAnimations/" + cmd.args.name, id: 8, class: "KeyframeSequence" }, keyframes: 2, poses: 6, length: 1 };
+    case "animation_discard":
+      return { discarded: true };
     default:
       return { op: cmd.op, args: cmd.args };
   }
@@ -218,6 +235,63 @@ r = await c1.callTool({ name: "export", arguments: { path: "Workspace/Baseplate"
 ok(r.isError && text(r).includes("overwrite"), "export refuses to clobber outside file");
 ok(fs.readFileSync(victim, "utf8") === "keep me", "victim untouched");
 fs.rmSync(outside, { recursive: true, force: true });
+
+// toolbox: quarantine report, release defaults, search without a key
+const toolNames = (await c1.listTools()).tools;
+for (const n of ["toolbox_search", "toolbox_insert", "toolbox_release", "import_animation"]) ok(toolNames.some((t) => t.name === n), `tool ${n} registered`);
+ok(/review/i.test(toolNames.find((t) => t.name === "toolbox_release").description), "release description asks for a review");
+ok(!/malware|malicious|backdoor|virus|trojan/i.test(JSON.stringify(toolNames.filter((t) => t.name.startsWith("toolbox")))), "neutral wording");
+
+r = await c1.callTool({ name: "toolbox_search", arguments: { query: "tree" } });
+let body = JSON.parse(text(r));
+ok(body.source === "studio" && body.results[0].id === 7 && body.results[0].verified === null, "search falls back to Studio");
+ok(/untrusted data/i.test(body.notice), "search results labelled untrusted");
+r = await c1.callTool({ name: "toolbox_search", arguments: { query: "tree", kind: "audio" } });
+ok(r.isError && text(r).includes("creator-store-product:read"), "audio search without a key explains the scope");
+
+r = await c1.callTool({ name: "toolbox_insert", arguments: { assetId: 77 } });
+body = JSON.parse(text(r));
+ok(body.path === "ServerStorage/RoLinkQuarantine/Tree_77", "insert reports quarantine path");
+ok(body.flags.some((f) => f.id === "require_numeric"), "insert report carries scan flags");
+ok(!text(r).includes('"source"'), "report has no full source field");
+ok(received.at(-1).args.assetId === 77, "asset id forwarded");
+r = await c1.callTool({ name: "toolbox_insert", arguments: { assetId: 77, context: "server" } });
+ok(r.isError && text(r).includes("edit"), "toolbox refuses play-test contexts");
+
+r = await c1.callTool({ name: "toolbox_release", arguments: { path: "ServerStorage/RoLinkQuarantine/Tree_77", target: "Workspace" } });
+ok(!r.isError && received.at(-1).op === "toolbox_release" && received.at(-1).args.enableScripts === false, "scripts stay disabled unless asked");
+
+// import_animation: glTF on disk -> staged keyframes -> one build command
+const animDir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-anim-e2e-"));
+{
+  const doc = new Document();
+  const buffer = doc.createBuffer();
+  const upper = doc.createNode("LeftUpperArm");
+  const lower = doc.createNode("LeftLowerArm").setTranslation([0, -1, 0]);
+  upper.addChild(lower);
+  doc.createScene("S").addChild(upper);
+  const input = doc.createAccessor().setType("SCALAR").setArray(new Float32Array([0, 1])).setBuffer(buffer);
+  const output = doc.createAccessor().setType("VEC4").setArray(new Float32Array([0, 0, 0, 1, Math.SQRT1_2, 0, 0, Math.SQRT1_2])).setBuffer(buffer);
+  const sampler = doc.createAnimationSampler().setInput(input).setOutput(output);
+  const anim = doc.createAnimation("Wave").addSampler(sampler);
+  anim.addChannel(doc.createAnimationChannel().setTargetNode(upper).setTargetPath("rotation").setSampler(sampler));
+  await new NodeIO().write(path.join(animDir, "wave.glb"), doc);
+}
+const beforeAnim = received.length;
+r = await c1.callTool({ name: "import_animation", arguments: { path: path.join(animDir, "wave.glb"), fps: 2 } });
+ok(!r.isError, "import_animation succeeds: " + text(r));
+body = JSON.parse(text(r));
+ok(body.created.class === "KeyframeSequence" && body.clip === "Wave" && body.mappedBones.LeftUpperArm === "LeftUpperArm", "import_animation report");
+ok(/docs\/ANIMATION\.md/.test(body.note), "points at publishing instructions");
+const animCmds = received.slice(beforeAnim);
+ok(animCmds.at(-1).op === "animation_build" && animCmds.slice(0, -1).every((c) => c.op === "animation_stage"), "staged, then built once");
+ok(animCmds.at(-1).args.tree.LeftUpperArm === "UpperTorso" && animCmds.at(-1).args.root === "HumanoidRootPart", "pose tree sent");
+ok(animCmds.at(-1).args.count === animCmds.length - 1, "chunk count matches");
+
+fs.writeFileSync(path.join(animDir, "x.fbx"), "FBX");
+r = await c1.callTool({ name: "import_animation", arguments: { path: path.join(animDir, "x.fbx") } });
+ok(r.isError && /glTF/.test(text(r)) && /Blender/.test(text(r)), "fbx explained");
+fs.rmSync(animDir, { recursive: true, force: true });
 
 r = await c1.callTool({ name: "sync_stop", arguments: {} });
 ok(text(r).includes("stopped"), "sync_stop");

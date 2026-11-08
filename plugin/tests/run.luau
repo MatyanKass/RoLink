@@ -324,4 +324,290 @@ do
 	model:Destroy()
 end
 
+-------------------------------------------------------------------------------
+H.section("Toolbox: quarantine and release")
+
+do
+	local game = H.game
+	local ServerStorage = game:GetService("ServerStorage")
+	local ProductInfo = {}
+	local loadCalls = 0
+	local objects -- set per test: function(id) -> Instance list for GetObjects
+
+	roblox.implementMethod("Selection", "Set", function() end)
+
+	local function makeAsset()
+		local m = Instance.new("Model")
+		m.Name = "LoadedAsset"
+		local s = Instance.new("Script")
+		s.Name = "Main"
+		s.Source = "print('hi')"
+		s.Enabled = true
+		s.Parent = m
+		local off = Instance.new("Script")
+		off.Name = "WasOff"
+		off.Enabled = false
+		off.Parent = m
+		local ls = Instance.new("LocalScript")
+		ls.Name = "Client"
+		ls.Enabled = true
+		ls.Parent = s
+		local mod = Instance.new("ModuleScript")
+		mod.Name = "Lib"
+		mod.Source = "return {}"
+		mod.Parent = m
+		local p = Instance.new("Part")
+		p.Name = "Block"
+		p.Parent = m
+		local snd = Instance.new("Sound")
+		snd.SoundId = "rbxassetid://555"
+		snd.Parent = p
+		return m
+	end
+
+	roblox.implementMethod("InsertService", "LoadAsset", function(_, id)
+		loadCalls += 1
+		if id == 404 or id == 405 then
+			error("HTTP 403 (Asset is not trusted for this place)")
+		end
+		return makeAsset()
+	end)
+	roblox.implementMethod("DataModel", "GetObjects", function(_, url)
+		local id = tonumber(string.match(url, "%d+"))
+		if objects then
+			return objects(id)
+		end
+		error("no such asset")
+	end)
+	roblox.implementMethod("MarketplaceService", "GetProductInfoAsync", function(_, id)
+		local info = ProductInfo[id]
+		if not info then
+			error("no info")
+		end
+		return info
+	end)
+	roblox.implementMethod("InsertService", "GetFreeModelsAsync", function(_, q, page)
+		local results = {}
+		for i = 1, 21 do
+			results[i] = { Name = q .. i, AssetId = page * 100 + i, AssetVersionId = 1, CreatorName = "Maker" }
+		end
+		return { { CurrentStartIndex = page * 21 + 1, TotalCount = 21, Results = results } }
+	end)
+
+	ProductInfo[999] = { Name = " Fancy/Tree\u{200B} ", Creator = { CreatorTargetId = 1, Name = "Maker", HasVerifiedBadge = true } }
+	ProductInfo[555] = { Name = "Song", Creator = { CreatorTargetId = 42, Name = "Other" } }
+
+	local Toolbox = H.require("Toolbox")
+	local before = #ws:GetChildren()
+	local r = Toolbox.insert({ assetId = 999 })
+
+	check(r.path == "ServerStorage/RoLinkQuarantine/Fancy_Tree_999", "quarantine path, name sanitized: " .. tostring(r.path))
+	check(#ws:GetChildren() == before, "nothing added to Workspace")
+	local q = ServerStorage:FindFirstChild("RoLinkQuarantine")
+	check(q ~= nil and q.ClassName == "Folder", "quarantine folder")
+	local c = q:FindFirstChild("Fancy_Tree_999")
+	check(c ~= nil, "container under quarantine")
+	for _, d in c:GetDescendants() do
+		if d:IsA("Script") or d:IsA("LocalScript") then
+			check(d.Enabled == false, "disabled: " .. d.Name)
+		end
+	end
+	check(r.loader == "LoadAsset", "loader reported")
+	check(r.creator.id == 1 and r.creator.verified == true, "creator info")
+	check(r.counts.parts == 1, "part count")
+	check(#r.scripts == 4, "all script kinds collected, got " .. #r.scripts)
+	local byName = {}
+	for _, s in r.scripts do
+		byName[s.name] = s
+	end
+	check(byName.Main.source == "print('hi')" and byName.Main.wasEnabled == true, "source + original state")
+	check(byName.WasOff.wasEnabled == false, "was already disabled")
+	check(byName.Client.path == "Main/Client", "relative path")
+	check(byName.Client.class == "LocalScript", "class")
+	check(byName.Lib.class == "ModuleScript" and byName.Lib.wasEnabled == nil, "module has no enabled state")
+	check(byName.Main.runContext == "Legacy", "run context")
+	check(#r.assetRefs == 1 and r.assetRefs[1].id == 555 and r.assetRefs[1].creatorId == 42, "referenced asset resolved")
+
+	local calls = loadCalls
+	local again = Toolbox.insert({ assetId = 999 })
+	check(loadCalls == calls and again.existing == true and again.path == r.path, "second insert reuses quarantine")
+
+	check(not pcall(Toolbox.insert, { assetId = "abc" }), "bad id")
+	check(not pcall(Toolbox.insert, { assetId = -1 }), "negative id")
+
+	-- fallback loader
+	objects = function()
+		local p = Instance.new("Part")
+		p.Name = "Solo"
+		local sc = Instance.new("Script")
+		sc.Enabled = true
+		sc.Parent = p
+		return { p }
+	end
+	local fb = Toolbox.insert({ assetId = 404 })
+	check(fb.loader == "GetObjects", "fallback loader used")
+	check(string.find(fb.path, "RoLinkQuarantine/Asset_404", 1, true) ~= nil, "fallback name: " .. fb.path)
+	local fbC = q:FindFirstChild("Asset_404")
+	check(fbC:FindFirstChild("Solo"):FindFirstChildOfClass("Script").Enabled == false, "fallback disabled too")
+	objects = nil
+	local okLoad, errLoad = pcall(Toolbox.insert, { assetId = 405 })
+	check(not okLoad and string.find(errLoad, "405", 1, true) ~= nil, "load failure names the id: " .. tostring(errLoad))
+
+	-- release
+	local notInQ = Instance.new("Part")
+	notInQ.Name = "Outsider"
+	notInQ.Parent = ws
+	check(not pcall(Toolbox.release, { path = "Workspace/Outsider", target = "Workspace" }), "only quarantined items can be released")
+	notInQ:Destroy()
+	check(not pcall(Toolbox.release, { path = r.path .. "/Main", target = "Workspace" }), "only direct children of quarantine")
+	check(not pcall(Toolbox.release, { path = r.path, target = "ServerStorage/RoLinkQuarantine" }), "cannot release into quarantine")
+
+	-- a script added after the scan never gets enabled
+	local late = Instance.new("Script")
+	late.Name = "Late"
+	late.Parent = c
+
+	local rel = Toolbox.release({ path = fb.path, target = "Workspace" })
+	check(rel.moved.path == "Workspace/Solo", "single child unwrapped: " .. rel.moved.path)
+	check(ws.Solo:FindFirstChildOfClass("Script").Enabled == false, "scripts stay disabled by default")
+	check(rel.enabled == 0 and rel.disabled == 1, "counts when disabled")
+	ws.Solo:Destroy()
+
+	local rel2 = Toolbox.release({ path = r.path, target = "Workspace", enableScripts = true })
+	check(rel2.moved.path == "Workspace/Fancy_Tree", "multi-child container renamed: " .. rel2.moved.path)
+	local out = ws:FindFirstChild("Fancy_Tree")
+	check(out.Main.Enabled == true, "originally enabled script enabled")
+	check(out.Main.Client.Enabled == true, "nested script enabled")
+	check(out.WasOff.Enabled == false, "originally disabled stays disabled")
+	check(out.Late.Enabled == false and rel2.unknownScripts == 1, "script added after the scan stays disabled")
+	check(out:GetAttribute("RoLinkAssetId") == nil and out.Main:GetAttribute("RoLinkWasEnabled") == nil, "quarantine attributes removed")
+	out:Destroy()
+
+	-- plugin-side search fallback
+	local s = Toolbox.search({ query = "tree", kind = "model", limit = 25 })
+	check(#s.results == 25 and s.results[1].name == "tree1" and s.results[1].creator == "Maker", "paged free model search")
+	check(s.results[22].id == 101, "second page reached")
+	check(not pcall(Toolbox.search, { query = "x", kind = "audio" }), "kinds without a Studio API are refused")
+end
+
+-------------------------------------------------------------------------------
+H.section("Animation: rig info, KeyframeSequence build, preview")
+
+do
+	local game = H.game
+	local ServerStorage = game:GetService("ServerStorage")
+	local Animation = H.require("Animation")
+
+	local function part(name, parent, cf)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.CFrame = cf or CFrame.new()
+		p.Parent = parent
+		return p
+	end
+	local function motor(part0, part1, c0)
+		local m = Instance.new("Motor6D")
+		m.Part0 = part0
+		m.Part1 = part1
+		m.C0 = c0
+		m.Parent = part1
+	end
+	local rig = Instance.new("Model")
+	rig.Name = "Rig"
+	-- rig facing +X in the world: joint frames must be relative to the root
+	local rootCf = CFrame.new(10, 3, 0) * CFrame.Angles(0, math.rad(90), 0)
+	local hrp = part("HumanoidRootPart", rig, rootCf)
+	local lower = part("LowerTorso", rig, rootCf)
+	local arm = part("LeftUpperArm", rig, rootCf)
+	motor(hrp, lower, CFrame.new(0, -1, 0))
+	motor(lower, arm, CFrame.new(-1, 0, 0) * CFrame.Angles(0, math.rad(90), 0))
+	rig.Parent = ws
+
+	local info = Animation.rigInfo({ rig = "Workspace/Rig" })
+	check(info.type == "R15", "rig kind detected: " .. tostring(info.type))
+	check(info.root == "HumanoidRootPart", "root part")
+	check(info.joints.LowerTorso.parent == "HumanoidRootPart", "joint parent")
+	near(info.joints.LowerTorso.r[1], 1, "identity joint frame")
+	near(info.joints.LeftUpperArm.r[3], 1, "rotated joint frame relative to root", 1e-3)
+
+	check(not pcall(Animation.build, { importId = "none", count = 1, name = "A" }), "unstaged data refused")
+
+	local kf = {
+		{ t = 0, p = { LowerTorso = { 0, 0, 0, 0, 0, 0, 1 }, LeftUpperArm = { 0, 0, 0, 0, 0, 0, 1 } } },
+		{ t = 0.5, p = { LowerTorso = { 0, 1, 0, 0, 0, 0, 1 }, LeftUpperArm = { 0, 0, 0, 0.7071068, 0, 0, 0.7071068 } } },
+	}
+	Animation.stage({ importId = "a1", index = 1, chunk = { kf[1] } })
+	Animation.stage({ importId = "a1", index = 2, chunk = { kf[2] } })
+	local built = Animation.build({
+		importId = "a1", count = 2, name = "Walk", root = "HumanoidRootPart",
+		tree = { LowerTorso = "HumanoidRootPart", LeftUpperArm = "LowerTorso" },
+		loop = true, priority = "Movement",
+	})
+	check(built.created.path == "ServerStorage/RoLinkAnimations/Walk", "default target: " .. built.created.path)
+	check(built.keyframes == 2 and built.poses == 6, "counts, got " .. built.keyframes .. "/" .. built.poses)
+	local seq = ServerStorage.RoLinkAnimations.Walk
+	check(seq.ClassName == "KeyframeSequence" and seq.Loop == true, "sequence props")
+	check(seq.Priority == roblox.Enum.AnimationPriority.Movement, "priority")
+	local frames = seq:GetChildren()
+	table.sort(frames, function(a, b)
+		return a.Time < b.Time
+	end)
+	check(#frames == 2 and frames[2].Time == 0.5, "keyframes under sequence")
+	local rootPose = frames[2]:FindFirstChild("HumanoidRootPart")
+	check(rootPose ~= nil and rootPose.ClassName == "Pose", "root pose named after the root part")
+	near(rootPose.CFrame.Position, Vector3.new(0, 0, 0), "unposed ancestor identity")
+	local lp = rootPose:FindFirstChild("LowerTorso")
+	near(lp.CFrame.Position, Vector3.new(0, 1, 0), "nested pose translation")
+	local ap = lp:FindFirstChild("LeftUpperArm")
+	check(ap.EasingStyle == roblox.Enum.PoseEasingStyle.Linear, "linear easing")
+	near(ap.CFrame, CFrame.new(0, 0, 0, 0.7071068, 0, 0, 0.7071068), "quaternion pose")
+
+	check(not pcall(Animation.build, { importId = "a1", count = 2, name = "Walk" }), "staged data consumed")
+
+	Animation.stage({ importId = "a2", index = 1, chunk = { kf[1] } })
+	check(not pcall(Animation.build, { importId = "a2", count = 2, name = "Partial", root = "HumanoidRootPart", tree = {} }), "missing chunk refused")
+	Animation.discard({ importId = "a2" })
+
+	Animation.stage({ importId = "a3", index = 1, chunk = { kf[1] } })
+	local okDup, errDup = pcall(Animation.build, { importId = "a3", count = 1, name = "Walk", root = "HumanoidRootPart", tree = { LowerTorso = "HumanoidRootPart", LeftUpperArm = "LowerTorso" } })
+	check(not okDup and string.find(errDup, "replace", 1, true) ~= nil, "duplicate name asks for replace: " .. tostring(errDup))
+	Animation.stage({ importId = "a4", index = 1, chunk = { kf[1] } })
+	local re = Animation.build({ importId = "a4", count = 1, name = "Walk", root = "HumanoidRootPart", replace = true, tree = { LowerTorso = "HumanoidRootPart", LeftUpperArm = "LowerTorso" } })
+	check(re.keyframes == 1 and #ServerStorage.RoLinkAnimations:GetChildren() == 1, "replace swaps the sequence")
+
+	-- preview: temporary id, played through Animator, Animator cleaned up
+	local registered
+	roblox.implementMethod("KeyframeSequenceProvider", "RegisterKeyframeSequence", function(_, s)
+		registered = s
+		return "rbxassetid://temp-hash"
+	end)
+	local stepped, stopped = 0, false
+	roblox.implementMethod("Animator", "LoadAnimation", function(_, a)
+		return {
+			Length = 0.1,
+			Play = function() end,
+			Stop = function()
+				stopped = true
+			end,
+			AdjustSpeed = function() end,
+			Destroy = function() end,
+			animationId = a.AnimationId,
+		}
+	end)
+	roblox.implementMethod("Animator", "StepAnimations", function()
+		stepped += 1
+	end)
+	local hum = Instance.new("Humanoid")
+	hum.Parent = rig
+	local pv = Animation.preview({ path = "ServerStorage/RoLinkAnimations/Walk", rig = "Workspace/Rig", seconds = 0.05 })
+	check(registered ~= nil and pv.id == "rbxassetid://temp-hash", "temporary id registered")
+	check(pv.temporary == true, "marked temporary")
+	check(stepped > 0 and stopped, "stepped then stopped")
+	check(hum:FindFirstChildOfClass("Animator") == nil, "temporary Animator removed")
+	check(not pcall(Animation.preview, { path = "ServerStorage/RoLinkAnimations/Walk", rig = "Workspace" }), "preview needs a rig with Humanoid/AnimationController")
+
+	rig:Destroy()
+	ServerStorage.RoLinkAnimations:Destroy()
+end
+
 H.done()
