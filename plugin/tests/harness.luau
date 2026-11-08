@@ -88,13 +88,16 @@ local cache = {}
 local folder = { Name = "RoLink" }
 local scripts = {}
 
-local function load(name)
-	if cache[name] then
+local function load(name, overrides)
+	if cache[name] and not overrides then
 		return cache[name]
 	end
 	local src = fs.readFile(SRC .. name .. ".lua")
 	local scriptObj = scripts[name]
 	local modEnv = table.clone(env)
+	for k, v in overrides or {} do
+		modEnv[k] = v
+	end
 	modEnv.script = scriptObj
 	modEnv.require = function(target)
 		if type(target) == "table" and target.__module then
@@ -104,7 +107,9 @@ local function load(name)
 	end
 	local fn = luau.load(src, { debugName = name, environment = modEnv })
 	local result = fn()
-	cache[name] = result
+	if not overrides then
+		cache[name] = result
+	end
 	return result
 end
 
@@ -126,6 +131,12 @@ M.serde = serde
 function M.require(name)
 	local _ = folder[name]
 	return load(name)
+end
+
+-- Fresh (uncached) load with extra globals, e.g. a mocked `game`.
+function M.requireWith(name, overrides)
+	local _ = folder[name]
+	return load(name, overrides)
 end
 
 function M.loadApi()

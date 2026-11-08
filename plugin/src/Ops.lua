@@ -8,6 +8,7 @@ local Selection = game:GetService("Selection")
 local Api = require(script.Parent.Api)
 local Build = require(script.Parent.Build)
 local Codec = require(script.Parent.Codec)
+local MeshImport = require(script.Parent.MeshImport)
 local Paths = require(script.Parent.Paths)
 local Serialize = require(script.Parent.Serialize)
 local Sync = require(script.Parent.Sync)
@@ -18,7 +19,7 @@ local Ops = {}
 -- ops that change the place: wrapped in one undo step, rolled back on error
 Ops.mutating = {
 	build = true, set = true, delete = true, clone = true, move = true, run = true,
-	terrain = true, import_rbxm = true, sync = true,
+	terrain = true, import_rbxm = true, sync = true, mesh_build = true, insert_asset = true,
 }
 
 local pluginRef -- set by Main
@@ -734,6 +735,30 @@ function Ops.import_rbxm(args)
 	end
 	Selection:Set(list)
 	return { created = createdRefs(list) }
+end
+
+-- ------------------------------------------------------------------ 3D model import
+
+function Ops.mesh_stage(args)
+	return MeshImport.stage(args)
+end
+
+function Ops.mesh_discard(args)
+	return MeshImport.discard(args)
+end
+
+function Ops.mesh_build(args)
+	local parent = args.parent and Paths.one(args.parent) or workspace
+	local model, n = MeshImport.build(args, parent)
+	Selection:Set({ model })
+	return { created = createdRefs({ model }), meshParts = n, persisted = false }
+end
+
+function Ops.insert_asset(args)
+	local parent = args.parent and Paths.one(args.parent) or workspace
+	local root = MeshImport.insert(args, parent)
+	Selection:Set({ root })
+	return { created = createdRefs({ root }), persisted = true }
 end
 
 -- ------------------------------------------------------------------ sync

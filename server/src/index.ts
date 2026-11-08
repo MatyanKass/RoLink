@@ -261,6 +261,25 @@ reg(
 );
 
 reg(
+  "import_model",
+  `Import a 3D model file from this PC (.obj/.gltf/.glb/.stl; .fbx only in upload mode) into Studio, visible immediately.
+mode "preview": parsed locally and built from EditableMesh MeshParts (no account needed, material colors only, NOT saved with the place).
+mode "upload": uploaded via Roblox Open Cloud (needs ROBLOX_API_KEY + ROBLOX_CREATOR_USER_ID/GROUP_ID on the server), then inserted — persistent, keeps textures.
+mode "auto" (default): upload if a key is configured, else preview. One undo step.`,
+  {
+    path: z.string().describe("Absolute path of the model file on this PC"),
+    parent: z.string().optional().describe('Parent path, default "Workspace"'),
+    name: z.string().optional().describe("Model name (default: file name)"),
+    scale: z.number().optional().describe("Uniform scale factor (file units → studs), default 1"),
+    fitSize: z.number().optional().describe("Scale so the largest dimension is this many studs (overrides scale)"),
+    position: z.array(z.number()).optional().describe("[x,y,z] world position of the model's bottom-center (default: origin)"),
+    anchored: z.boolean().optional().describe("Default true"),
+    mode: z.enum(["auto", "preview", "upload"]).optional(),
+    flipFaces: z.boolean().optional().describe("Preview: reverse triangle winding if the model looks inside-out"),
+  },
+);
+
+reg(
   "sync_start",
   "Start live file sync for a project folder (Rojo-compatible *.project.json). Pushes everything now, then every file save; scripts edited in Studio are written back.",
   { project: z.string().describe("Project folder or *.project.json path") },

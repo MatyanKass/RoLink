@@ -13,12 +13,14 @@
     "test": "node test/e2e.mjs",
     "plugin:build": "node ../plugin/build.mjs",
     "plugin:install": "node ../plugin/build.mjs --install",
-    "test:plugin": "cd ../plugin/tests && ../../tools/bin/lune.exe run run.luau"
+    "test:plugin": "cd ../plugin/tests && ../../tools/bin/lune.exe run run.luau",
+    "test:unit": "node --test test/meshimport.test.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@gltf-transform/core": "^4.5.1",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "chokidar": "^5.0.0",
     "jpeg-js": "^0.4.4",

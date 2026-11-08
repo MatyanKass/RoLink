@@ -235,4 +235,93 @@ check(boxes == 1, "replace leaves one box")
 local top = Build.run(ws, { { name = "Shifted", size = { 1, 1, 1 }, at = { 1, 0, 0 } } }, { origin = { p = { 100, 0, 0 } } })
 near(top.created[1].CFrame.Position, Vector3.new(101, 0, 0), "build origin offsets top-level items")
 
+-------------------------------------------------------------------------------
+H.section("MeshImport (mocked EditableMesh)")
+
+do
+	local calls = { verts = {}, tris = {}, normals = 0, faceNormals = 0, uvs = 0 }
+	local FakeEM = {}
+	FakeEM.__index = FakeEM
+	function FakeEM:AddVertex(p)
+		table.insert(calls.verts, p)
+		return #calls.verts + 100
+	end
+	function FakeEM:AddTriangle(a, b, c)
+		table.insert(calls.tris, { a, b, c })
+		return #calls.tris
+	end
+	function FakeEM:AddNormal(_)
+		calls.normals += 1
+		return calls.normals
+	end
+	function FakeEM:SetFaceNormals(_, ids)
+		check(#ids == 3, "face normals get 3 ids")
+		calls.faceNormals += 1
+	end
+	function FakeEM:AddUV(_)
+		calls.uvs += 1
+		return calls.uvs
+	end
+	function FakeEM:SetFaceUVs() end
+	local fakeAssets = {
+		CreateEditableMesh = function()
+			return setmetatable({}, FakeEM)
+		end,
+		CreateMeshPartAsync = function(_, content)
+			check(content.obj ~= nil, "CreateMeshPartAsync gets Content.fromObject(em)")
+			return Instance.new("MeshPart")
+		end,
+	}
+	local fakeGame = {
+		GetService = function(_, n)
+			if n == "AssetService" then
+				return fakeAssets
+			end
+			return H.game:GetService(n)
+		end,
+	}
+	local MeshImport = H.requireWith("MeshImport", {
+		game = fakeGame,
+		Content = { fromObject = function(o) return { obj = o } end },
+	})
+
+	local function packF32(list)
+		local b = buffer.create(#list * 4)
+		for i, v in list do
+			buffer.writef32(b, (i - 1) * 4, v)
+		end
+		return Util.base64Encode(b)
+	end
+	local function packU32(list)
+		local b = buffer.create(#list * 4)
+		for i, v in list do
+			buffer.writeu32(b, (i - 1) * 4, v)
+		end
+		return Util.base64Encode(b)
+	end
+	local chunk = {
+		name = "Quad",
+		color = { 1, 0, 0 },
+		center = { 0, 0.5, 0 },
+		size = { 2, 1, 0 },
+		positions = packF32({ -1, -0.5, 0, 1, -0.5, 0, 1, 0.5, 0, -1, 0.5, 0 }),
+		normals = packF32({ 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1 }),
+		uvs = packF32({ 0, 1, 1, 1, 1, 0, 0, 0 }),
+		indices = packU32({ 0, 1, 2, 0, 2, 3 }),
+	}
+	MeshImport.stage({ importId = "t1", index = 1, chunk = chunk })
+	local model, n = MeshImport.build({ importId = "t1", count = 1, name = "Imp", position = { 10, 0, 0 } }, ws)
+	check(#calls.verts == 4, "4 vertices added")
+	near(calls.verts[3], Vector3.new(1, 0.5, 0), "vertex decoded from float32")
+	check(#calls.tris == 2 and calls.tris[2][3] == 104, "triangles use vertex ids")
+	check(calls.normals == 4 and calls.faceNormals == 2 and calls.uvs == 4, "normals/uvs set per face")
+	check(n == 1 and model.Name == "Imp" and model.Parent == ws, "model parented")
+	local part = model:FindFirstChild("Quad")
+	check(part ~= nil and part.Color == Color3.new(1, 0, 0), "material color applied")
+	near(part.CFrame.Position, Vector3.new(10, 0.5, 0), "part placed at chunk center + position")
+	check(part.Anchored == true, "anchored by default")
+	check(not pcall(MeshImport.build, { importId = "t1", count = 1 }, ws), "staged data is consumed")
+	model:Destroy()
+end
+
 H.done()

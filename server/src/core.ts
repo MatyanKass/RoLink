@@ -9,6 +9,9 @@ import { getApi } from "./apidump.js";
 import { log } from "./config.js";
 import { captureStudio, cropToMarkers, downscale, toJpeg } from "./screenshot.js";
 import { Project, SyncSession, findProjectFile } from "./sync.js";
+import { randomUUID } from "node:crypto";
+import { PREVIEW_EXTS, UPLOAD_EXTS, loadModel, prepareChunks, validateModelPath } from "./meshimport.js";
+import { uploadConfig, uploadModel } from "./assetupload.js";
 
 export interface ImageOut {
   data: string; // base64
@@ -101,6 +104,8 @@ export class Core {
         return this.exportModel(args);
       case "import":
         return this.importFile(args);
+      case "import_model":
+        return this.importModel(args);
       case "sync_start":
         return this.syncStart(args);
       case "sync_stop":
@@ -227,6 +232,49 @@ export class Core {
       else node.cf = args.cframe;
     }
     return json(await this.op(args, "build", { parent: args.parent, items: [node], replace: args.replace }, 180_000));
+  }
+
+  private async importModel(args: Args): Promise<ToolResult> {
+    const mode: string = args.mode ?? "auto";
+    if (!["auto", "preview", "upload"].includes(mode)) throw new Error(`mode must be auto | preview | upload`);
+    const cfg = uploadConfig();
+    const useUpload = mode === "upload" || (mode === "auto" && !!cfg);
+    const v = validateModelPath(args.path, useUpload ? UPLOAD_EXTS : [...PREVIEW_EXTS, ".fbx"]);
+    if (!useUpload && v.ext === ".fbx")
+      throw new Error(".fbx can only be imported via upload mode: set ROBLOX_API_KEY and ROBLOX_CREATOR_USER_ID (or ROBLOX_CREATOR_GROUP_ID) for the RoLink server, or convert to .glb/.obj");
+    const name: string = args.name ?? path.basename(v.file, v.ext);
+    const s = this.session(args);
+    const common = { parent: args.parent, name, position: args.position, anchored: args.anchored ?? true, scale: args.scale, fitSize: args.fitSize };
+
+    if (useUpload) {
+      if (!cfg) throw new Error("upload mode needs ROBLOX_API_KEY and ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID in the RoLink server environment");
+      const up = await uploadModel(cfg, v.file, v.ext, name, { timeoutMs: 180_000 });
+      const r = await this.bridge.send(s.id, "insert_asset", { ...common, assetId: up.assetId }, 120_000);
+      return json({ mode: "upload", assetId: up.assetId, ...r });
+    }
+
+    const groups = await loadModel(v.file, v.ext);
+    const prep = prepareChunks(groups, { scale: args.scale, fitSize: args.fitSize, flipFaces: args.flipFaces });
+    const importId = randomUUID();
+    try {
+      // stage chunks one per command (keeps each poll response ~1 MB), then build in one undo step
+      for (let i = 0; i < prep.chunks.length; i++)
+        await this.bridge.send(s.id, "mesh_stage", { importId, index: i + 1, chunk: prep.chunks[i] }, 60_000);
+      const r = await this.bridge.send(s.id, "mesh_build", { ...common, importId, count: prep.chunks.length, size: prep.size }, 300_000);
+      return json({
+        mode: "preview",
+        ...r,
+        parts: prep.chunks.length,
+        triangles: prep.triangles,
+        vertices: prep.vertices,
+        size: prep.size.map((x) => +x.toFixed(3)),
+        scale: +prep.scale.toPrecision(6),
+        note: "Preview parts are EditableMesh-based and are NOT saved with the place. Use mode=upload (Open Cloud key) for a persistent asset.",
+      });
+    } catch (e) {
+      await this.bridge.send(s.id, "mesh_discard", { importId }, 15_000).catch(() => {});
+      throw e;
+    }
   }
 
   private async syncStart(args: Args): Promise<ToolResult> {
