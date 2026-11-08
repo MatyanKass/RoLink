@@ -56,16 +56,30 @@ local function key(path)
 	return table.concat(path, "\0")
 end
 
+local stats -- per-apply counters/errors, reset in Sync.apply
+
+local function pushError(msg)
+	if stats then
+		table.insert(stats.errors, msg)
+	end
+end
+
 local function setSource(inst, src)
 	applying[inst] = src
-	local ok = pcall(function()
+	local ok, err = pcall(function()
 		inst.Source = src
 	end)
 	if not ok then
-		local ScriptEditorService = game:GetService("ScriptEditorService")
-		ScriptEditorService:UpdateSourceAsync(inst, function()
-			return src
+		local okSes, errSes = pcall(function()
+			local ScriptEditorService = game:GetService("ScriptEditorService")
+			ScriptEditorService:UpdateSourceAsync(inst, function()
+				return src
+			end)
 		end)
+		if not okSes then
+			applying[inst] = nil
+			pushError(inst:GetFullName() .. ": could not set Source (" .. tostring(err) .. "; " .. tostring(errSes) .. ")")
+		end
 	end
 end
 
@@ -170,8 +184,6 @@ end
 
 -- files -> Studio ------------------------------------------------------------
 
-local stats
-
 local function replaceClass(old, className)
 	local new = Instance.new(className)
 	new.Name = old.Name
@@ -193,9 +205,14 @@ local function applyProps(inst, props)
 			return inst[prop]
 		end)
 		if okRead then
-			pcall(function()
+			local okSet, err = pcall(function()
 				inst[prop] = Codec.decode(Api.propType(inst.ClassName, prop), v, cur)
 			end)
+			if not okSet then
+				pushError(inst:GetFullName() .. "." .. tostring(prop) .. ": " .. tostring(err))
+			end
+		else
+			pushError(inst:GetFullName() .. ": unknown property " .. tostring(prop))
 		end
 	end
 end

@@ -66,6 +66,15 @@ async function plugin() {
     }
     const b = await r.json();
     for (const cmd of b.commands ?? []) {
+      if (cmd.op === "run" && cmd.args.code === "badjson") {
+        await post("/plugin/result", { s: session, id: cmd.id, chunk: 0, chunks: 2, data: '{"ok":tr' });
+        await post("/plugin/result", { s: session, id: cmd.id, chunk: 1, chunks: 2, data: "XX" });
+        continue;
+      }
+      if (cmd.op === "run" && cmd.args.code === "badchunk") {
+        await post("/plugin/result", { s: session, id: cmd.id, chunk: 5, chunks: 2, data: "{}" });
+        continue;
+      }
       try {
         await reply(cmd.id, true, handle(cmd));
       } catch (e) {
@@ -113,6 +122,22 @@ ok(text(r).includes("Baseplate"), "proxied tree");
 // browsers are refused
 const evil = await fetch(`${BASE}/rpc`, { method: "POST", headers: { origin: "https://evil.example", "content-type": "text/plain" }, body: "{}" });
 ok(evil.status === 403, "Origin header refused");
+
+// /rpc needs the owner's token; /health leaks no session ids
+const noTok = await fetch(`${BASE}/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool: "status", args: {} }) });
+ok(noTok.status === 401, "rpc without token refused");
+const badTok = await fetch(`${BASE}/rpc`, { method: "POST", headers: { "content-type": "application/json", "x-rolink-token": "nope" }, body: JSON.stringify({ tool: "status", args: {} }) });
+ok(badTok.status === 401, "rpc with wrong token refused");
+const health = await (await fetch(`${BASE}/health`)).json();
+ok(health.rolink && health.sessions.length === 1 && !("id" in health.sessions[0]), "health has no session ids");
+ok(!JSON.stringify(health).includes(session), "session id not in health");
+
+// malformed chunked results reject the call instead of hanging / crashing
+const badJson = c1.callTool({ name: "run", arguments: { code: "badjson" } });
+r = await badJson;
+ok(r.isError && text(r).includes("not valid JSON"), "bad chunked JSON rejects the call: " + text(r));
+r = await c1.callTool({ name: "run", arguments: { code: "badchunk" } });
+ok(r.isError && text(r).includes("invalid chunk"), "out-of-range chunk rejects the call: " + text(r));
 
 // ---------------------------------------------------------------- sync
 const proj = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-e2e-"));
@@ -167,11 +192,32 @@ ok(fs.readFileSync(path.join(proj, "src", "server", "Main.server.lua"), "utf8").
 await post("/plugin/event", { s: session, type: "created", path: ["ReplicatedStorage", "Shared", "Util", "NewThing"], class: "ModuleScript", source: "return 3\n" });
 await sleep(300);
 ok(fs.existsSync(path.join(proj, "src", "shared", "Util", "NewThing.luau")), "script created in Studio gets a file");
+for (const evilName of ["..", "../../escape", "a/b", "x\\y", "c:d", "q?"]) {
+  await post("/plugin/event", { s: session, type: "created", path: ["ReplicatedStorage", "Shared", evilName], class: "ModuleScript", source: "return 'pwn'\n" });
+}
+await sleep(300);
+ok(!fs.existsSync(path.join(proj, "escape.luau")) && !fs.existsSync(path.join(proj, "src", "escape.luau")), "path traversal names refused");
+ok(!fs.readdirSync(path.join(proj, "src", "shared")).some((f) => f.includes("pwn") || f.startsWith("..") || f.startsWith("a") || f.startsWith("q")), "unsafe names not written");
+
+// .json -> ModuleScript must survive "]==]" inside the data
+fs.writeFileSync(path.join(proj, "src", "shared", "Data.json"), JSON.stringify({ s: "a]]b]=]c]==]d" }));
+for (let i = 0; i < 40 && !received.some((c) => c.op === "sync" && c.args.upsert?.some((u) => u.path.join("/") === "ReplicatedStorage/Shared/Data")); i++) await sleep(100);
+const dataItem = received.filter((c) => c.op === "sync").flatMap((c) => c.args.upsert ?? []).find((u) => u.path.join("/") === "ReplicatedStorage/Shared/Data");
+ok(dataItem && dataItem.source.includes("[===[") && dataItem.source.endsWith("]===])"), "json long-bracket level avoids ]==]: " + dataItem?.source);
 
 // no echo: our own write must not bounce back as a patch
 const echoStart = received.length;
 await sleep(800);
 ok(!received.slice(echoStart).some((c) => c.op === "sync" && c.args.upsert?.some((u) => u.path.join("/") === "ServerScriptService/Main")), "no echo of Studio edits");
+
+// export refuses to overwrite existing files outside cwd/sync root without overwrite:true
+const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-out-"));
+const victim = path.join(outside, "victim.model.json");
+fs.writeFileSync(victim, "keep me");
+r = await c1.callTool({ name: "export", arguments: { path: "Workspace/Baseplate", file: victim } });
+ok(r.isError && text(r).includes("overwrite"), "export refuses to clobber outside file");
+ok(fs.readFileSync(victim, "utf8") === "keep me", "victim untouched");
+fs.rmSync(outside, { recursive: true, force: true });
 
 r = await c1.callTool({ name: "sync_stop", arguments: {} });
 ok(text(r).includes("stopped"), "sync_stop");

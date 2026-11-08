@@ -8,7 +8,10 @@
 // Other RoLink processes (a second Claude session) talk to us through POST /rpc.
 
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { EventEmitter } from "node:events";
 import { COMMAND_TIMEOUT_MS, HOST, POLL_HOLD_MS, PORT, SESSION_TTL_MS, VERSION, log } from "./config.js";
 
@@ -41,6 +44,28 @@ interface Session extends SessionInfo {
 
 export class PluginError extends Error {}
 
+/** Where the port owner stores the /rpc token (user-only file in the user's temp dir). */
+export function tokenFile(port = PORT) {
+  return path.join(os.tmpdir(), `rolink-${port}.token`);
+}
+
+export function readToken(port = PORT): string | undefined {
+  try {
+    return fs.readFileSync(tokenFile(port), "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sameToken(a: string, b: string) {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+const MAX_CHUNKS = 1000;
+const MAX_RESULT_BYTES = 256 * 1024 * 1024;
+
 type RpcHandler = (tool: string, args: unknown) => Promise<unknown>;
 type ApiProvider = () => Promise<unknown>;
 
@@ -48,6 +73,8 @@ export class Bridge extends EventEmitter {
   private sessions = new Map<string, Session>();
   private server?: http.Server;
   rpcHandler?: RpcHandler;
+  /** required in the x-rolink-token header of POST /rpc */
+  readonly token = randomBytes(32).toString("hex");
   apiProvider?: ApiProvider;
 
   /** Try to own the port. Returns false if another process already does. */
@@ -72,6 +99,13 @@ export class Bridge extends EventEmitter {
     });
     if (!ok) return false;
     this.server = server;
+    try {
+      const f = tokenFile();
+      fs.rmSync(f, { force: true });
+      fs.writeFileSync(f, this.token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    } catch (e) {
+      log("could not write rpc token file", e);
+    }
     setInterval(() => this.reap(), 5_000).unref();
     log(`bridge listening on http://${HOST}:${PORT}`);
     return true;
@@ -168,7 +202,12 @@ export class Bridge extends EventEmitter {
 
     switch (route) {
       case "GET /health":
-        return sendJson(res, 200, { rolink: true, version: VERSION, sessions: this.list() });
+        // no session ids here: they are the plugin routes' only credential
+        return sendJson(res, 200, {
+          rolink: true,
+          version: VERSION,
+          sessions: this.list().map(({ id: _id, ...rest }) => rest),
+        });
 
       case "POST /plugin/hello": {
         const b = (await readJson(req)) as Partial<SessionInfo> & { replaces?: string };
@@ -238,16 +277,40 @@ export class Bridge extends EventEmitter {
         const p = s.pending.get(b.id);
         if (!p) return sendJson(res, 200, { ok: true, late: true });
 
+        const fail = (why: string) => {
+          s.pending.delete(b.id);
+          clearTimeout(p.timer);
+          p.reject(new PluginError(`bad result for "${p.op}": ${why}`));
+          return sendJson(res, 400, { error: why });
+        };
         let msg = b;
-        if (b.chunks && b.chunks > 1) {
-          // Big results arrive as several string pieces of one JSON document.
-          p.chunks ??= [];
-          p.chunks[b.chunk ?? 0] = b.data ?? "";
-          const got = p.chunks.filter((x) => x !== undefined).length;
-          if (got < b.chunks) return sendJson(res, 200, { ok: true });
-          msg = JSON.parse(p.chunks.join(""));
-        } else if (b.chunks === 1 && typeof b.data === "string") {
-          msg = JSON.parse(b.data);
+        if (b.chunks !== undefined) {
+          const chunks = b.chunks;
+          const chunk = b.chunk ?? 0;
+          if (!Number.isInteger(chunks) || !Number.isInteger(chunk) || chunks < 1 || chunks > MAX_CHUNKS || chunk < 0 || chunk >= chunks) {
+            return fail(`invalid chunk ${chunk}/${chunks}`);
+          }
+          if (typeof b.data !== "string") return fail("chunk without data");
+          let text: string;
+          if (chunks > 1) {
+            // Big results arrive as several string pieces of one JSON document.
+            p.chunks ??= [];
+            p.chunks[chunk] = b.data;
+            const total = p.chunks.reduce((n, x) => n + (x?.length ?? 0), 0);
+            if (total > MAX_RESULT_BYTES) return fail("result too large");
+            let got = 0;
+            for (let i = 0; i < chunks; i++) if (p.chunks[i] !== undefined) got++;
+            if (got < chunks) return sendJson(res, 200, { ok: true });
+            text = p.chunks.slice(0, chunks).join("");
+          } else {
+            text = b.data;
+          }
+          try {
+            msg = JSON.parse(text);
+          } catch (e: any) {
+            return fail(`result is not valid JSON (${e?.message ?? e})`);
+          }
+          if (!msg || typeof msg !== "object") return fail("result is not an object");
         }
 
         s.pending.delete(b.id);
@@ -280,6 +343,8 @@ export class Bridge extends EventEmitter {
 
       case "POST /rpc": {
         if (!this.rpcHandler) return sendJson(res, 404, { error: "no rpc" });
+        const tok = req.headers["x-rolink-token"];
+        if (typeof tok !== "string" || !sameToken(tok, this.token)) return sendJson(res, 401, { error: "bad token" });
         const b = (await readJson(req)) as { tool: string; args: unknown };
         try {
           const result = await this.rpcHandler(b.tool, b.args);
@@ -298,7 +363,7 @@ function publicInfo(s: Session | SessionInfo): SessionInfo {
   return { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen };
 }
 
-const MAX_BODY = 256 * 1024 * 1024;
+const MAX_BODY = 64 * 1024 * 1024; // results are chunked at ~900 KB; import_model sends only paths
 
 function readJson(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {

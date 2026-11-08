@@ -255,7 +255,7 @@ export class Project {
       item = {
         path: instPath,
         class: "ModuleScript",
-        source: `return game:GetService("HttpService"):JSONDecode([==[${text}]==])`,
+        source: `return game:GetService("HttpService"):JSONDecode(${luaLongString(text)})`,
         file,
       };
     }
@@ -276,6 +276,23 @@ function instanceName(file: string): string | null {
   if (m) return m[1];
   for (const ext of [".rbxm", ".txt", ".json"]) if (file.endsWith(ext)) return file.slice(0, -ext.length);
   return null;
+}
+
+/** Lua long-bracket literal whose level does not occur in the text. */
+export function luaLongString(text: string): string {
+  let eq = "";
+  while (text.includes(`]${eq}]`)) eq += "=";
+  // a leading newline right after the opening bracket is dropped by Lua
+  return `[${eq}[${text.startsWith("\n") || text.startsWith("\r") ? "\n" : ""}${text}]${eq}]`;
+}
+
+/** Instance name safe to use as a single file name inside the sync tree. */
+export function safeFileName(name: unknown): name is string {
+  if (typeof name !== "string" || name.length === 0 || name.length > 200) return false;
+  if (/[\/\\:*?"<>|\x00-\x1f\x7f]/.test(name)) return false;
+  if (name === "." || name === ".." || name.includes("..")) return false;
+  if (/[. ]$/.test(name)) return false; // Windows strips these
+  return true;
 }
 
 function sha1(x: string | Buffer) {
@@ -388,6 +405,7 @@ export class SyncSession {
   /** Studio edited / created a script: write it to disk. */
   async onPluginEvent(ev: { type: string; path: string[]; class: string; source: string }) {
     if (!this.snap) return;
+    if (!Array.isArray(ev.path) || ev.path.length === 0 || typeof ev.source !== "string") return;
     const k = key(ev.path);
     let item = this.snap.items.find((i) => key(i.path) === k);
     let target: string | undefined;
@@ -396,8 +414,19 @@ export class SyncSession {
     } else if (ev.type === "created") {
       const parentDir = this.snap.dirs.get(key(ev.path.slice(0, -1)));
       if (!parentDir) return;
+      const name = ev.path[ev.path.length - 1];
+      if (!safeFileName(name)) {
+        this.note(`skipped Studio-created script with unsafe name ${JSON.stringify(name)}`);
+        return;
+      }
       const suffix = ev.class === "Script" ? ".server.luau" : ev.class === "LocalScript" ? ".client.luau" : ".luau";
-      target = path.join(parentDir, ev.path[ev.path.length - 1] + suffix);
+      target = path.resolve(parentDir, name + suffix);
+      const root = path.resolve(this.project.root);
+      const rel = path.relative(root, target);
+      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+        this.note(`refused to write outside the sync root: ${target}`);
+        return;
+      }
       if (fs.existsSync(target)) return;
       item = { path: ev.path, class: ev.class, source: ev.source, file: this.project.rel(target) };
       this.snap.items.push(item);

@@ -18,6 +18,7 @@ local port = plugin:GetSetting("RoLinkPort") or DEFAULT_PORT
 local base = "http://127.0.0.1:" .. tostring(port)
 
 local session = nil
+local prevSession = nil -- last session id, sent as `replaces` on reconnect
 local wantConnected = false
 local loopRunning = false
 local statusText = "Disconnected"
@@ -87,9 +88,30 @@ local function postResult(id, ok, result)
 	if not okEnc then
 		body = HttpService:JSONEncode({ ok = false, error = "result is not JSON-encodable: " .. tostring(body) })
 	end
-	local n = math.max(1, math.ceil(#body / CHUNK))
-	for i = 1, n do
-		local piece = string.sub(body, (i - 1) * CHUNK + 1, i * CHUNK)
+	-- split on UTF-8 boundaries: never cut inside a multibyte character
+	local pieces = {}
+	local len = #body
+	local pos = 1
+	while pos <= len do
+		local stop = math.min(pos + CHUNK - 1, len)
+		if stop < len then
+			-- move back while the next byte is a continuation byte (10xxxxxx)
+			while stop > pos do
+				local b = string.byte(body, stop + 1)
+				if b < 0x80 or b >= 0xC0 then
+					break
+				end
+				stop -= 1
+			end
+		end
+		table.insert(pieces, string.sub(body, pos, stop))
+		pos = stop + 1
+	end
+	if #pieces == 0 then
+		pieces[1] = ""
+	end
+	local n = #pieces
+	for i, piece in pieces do
 		postJson("/plugin/result", { s = session, id = id, chunk = i - 1, chunks = n, data = piece })
 	end
 end
@@ -105,19 +127,30 @@ local function runWorker()
 	end
 	workerBusy = true
 	task.spawn(function()
-		while #queue > 0 do
-			local cmd = table.remove(queue, 1)
-			local t0 = os.clock()
-			local ok, res = pcall(Ops.dispatch, cmd.op, cmd.args)
-			local ms = math.floor((os.clock() - t0) * 1000)
-			if ok then
-				log(string.format("%s  ✓ %dms", cmd.op, ms))
-			else
-				log(string.format("%s  ✗ %s", cmd.op, tostring(res)))
+		local okLoop, loopErr = pcall(function()
+			while #queue > 0 do
+				local cmd = table.remove(queue, 1)
+				local t0 = os.clock()
+				local ok, res = pcall(Ops.dispatch, cmd.op, cmd.args)
+				local ms = math.floor((os.clock() - t0) * 1000)
+				if ok then
+					log(string.format("%s  ✓ %dms", cmd.op, ms))
+				else
+					log(string.format("%s  ✗ %s", cmd.op, tostring(res)))
+				end
+				local okPost, postErr = pcall(postResult, cmd.id, ok, res)
+				if not okPost then
+					log("could not send result: " .. tostring(postErr))
+				end
 			end
-			postResult(cmd.id, ok, res)
-		end
+		end)
 		workerBusy = false
+		if not okLoop then
+			log("worker error: " .. tostring(loopErr))
+		end
+		if #queue > 0 then
+			runWorker()
+		end
 	end)
 end
 
@@ -130,12 +163,13 @@ local function hello()
 		placeId = game.PlaceId,
 		gameId = game.GameId,
 		pluginVersion = VERSION,
-		replaces = session,
+		replaces = session or prevSession,
 	})
 	if status ~= 200 or not data or not data.session then
 		return false
 	end
 	session = data.session
+	prevSession = nil
 	if not Api.loaded() then
 		local st, api = request("GET", "/plugin/api")
 		if st == 200 and api then
@@ -179,9 +213,11 @@ local function connectLoop()
 					runWorker()
 				end
 			elseif status == 410 then
+				prevSession = session
 				session = nil
 				log("server forgot this session, reconnecting")
 			else
+				prevSession = session
 				session = nil
 				setStatus("Server unreachable, retrying…")
 				task.wait(backoff)

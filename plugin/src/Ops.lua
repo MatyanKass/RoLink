@@ -660,9 +660,24 @@ function Ops.run(args)
 			return wrapper(env.print, env.warn, env.args, env.plugin)
 		end
 	end
-	local results = table.pack(xpcall(fn, function(e)
-		return tostring(e) .. "\n" .. debug.traceback(nil, 2)
-	end))
+	-- run in its own thread so blocking user code (endless waits etc.) cannot
+	-- wedge the command worker; cancel it after `timeout` seconds
+	local timeout = tonumber(args.timeout) or 30
+	local results = nil
+	local thread = task.spawn(function()
+		results = table.pack(xpcall(fn, function(e)
+			return tostring(e) .. "\n" .. debug.traceback(nil, 2)
+		end))
+	end)
+	local deadline = os.clock() + timeout
+	while results == nil and os.clock() < deadline do
+		task.wait()
+	end
+	if results == nil then
+		pcall(task.cancel, thread)
+		-- raise so dispatch cancels the undo recording
+		error(string.format("run timed out after %gs (code cancelled)", timeout), 0)
+	end
 	if not results[1] then
 		return { ok = false, error = results[2], output = output }
 	end
@@ -791,6 +806,9 @@ function Ops.dispatch(op, args)
 	end
 	if not ok then
 		error(res, 0)
+	end
+	if not rec and type(res) == "table" and res.warning == nil then
+		res.warning = "not undoable"
 	end
 	return res
 end

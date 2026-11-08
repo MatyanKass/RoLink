@@ -133,7 +133,9 @@ export class Core {
   }
 
   private async run(args: Args): Promise<ToolResult> {
-    const r = await this.op(args, "run", { code: args.code, args: args.args }, (args.timeout ?? 60) * 1000);
+    const timeout = Math.max(1, Number(args.timeout ?? 30));
+    // the plugin enforces `timeout` itself (cancels the code); we wait a bit longer for its answer
+    const r = await this.op(args, "run", { code: args.code, args: args.args, timeout }, (timeout + 15) * 1000);
     const parts: string[] = [];
     if (r.output?.length) parts.push("output:\n" + r.output.join("\n"));
     if (r.ok) parts.push("returns: " + JSON.stringify(r.returns ?? []));
@@ -198,9 +200,22 @@ export class Core {
     return path.resolve(base, file);
   }
 
+  /** cwd or the active sync project root */
+  private isInsideWorkArea(file: string) {
+    const abs = path.resolve(file);
+    const roots = [process.cwd(), this.sync?.project.root].filter((x): x is string => !!x).map((r) => path.resolve(r));
+    return roots.some((r) => {
+      const rel = path.relative(r, abs);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+    });
+  }
+
   private async exportModel(args: Args): Promise<ToolResult> {
     const file = this.resolveFile(args.file);
     const format = args.format ?? (file.endsWith(".rbxm") ? "rbxm" : "json");
+    if (!args.overwrite && fs.existsSync(file) && !this.isInsideWorkArea(file)) {
+      throw new Error(`${file} already exists and is outside the working folder / sync project; pass overwrite:true to replace it`);
+    }
     await fsp.mkdir(path.dirname(file), { recursive: true });
     if (format === "rbxm") {
       const r = await this.op(args, "export_rbxm", { path: args.path }, 120_000);

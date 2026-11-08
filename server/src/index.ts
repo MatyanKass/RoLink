@@ -7,7 +7,7 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { Bridge } from "./bridge.js";
+import { Bridge, readToken } from "./bridge.js";
 import { HOST, PORT, SERVER_DIR, VERSION, log } from "./config.js";
 import { Core, type ToolResult } from "./core.js";
 
@@ -24,21 +24,37 @@ async function ensureOwner(): Promise<boolean> {
   return false;
 }
 
+class RpcError extends Error {}
+
+/** The owning process is gone (refused / connection dropped mid-request). */
+function ownerGone(e: any) {
+  const code = e?.cause?.code ?? e?.code;
+  const msg = String(e?.cause?.message ?? e?.message ?? "");
+  return code === "ECONNREFUSED" || code === "ECONNRESET" || code === "UND_ERR_SOCKET" || /socket hang up|other side closed/i.test(msg);
+}
+
+async function forward(tool: string, args: Record<string, unknown>): Promise<ToolResult> {
+  const r = await fetch(`http://${HOST}:${PORT}/rpc`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-rolink-token": readToken() ?? "" },
+    body: JSON.stringify({ tool, args }),
+  });
+  if (r.status === 401) throw new RpcError(`the RoLink process on port ${PORT} rejected our token (is it another user's server?)`);
+  const body = (await r.json()) as { ok: boolean; result?: ToolResult; error?: string };
+  if (!body.ok) throw new RpcError(body.error ?? "rpc failed");
+  return body.result!;
+}
+
 async function callTool(tool: string, args: Record<string, unknown>): Promise<ToolResult> {
   if (core) return core.call(tool, args);
-  try {
-    const r = await fetch(`http://${HOST}:${PORT}/rpc`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tool, args }),
-    });
-    const body = (await r.json()) as { ok: boolean; result?: ToolResult; error?: string };
-    if (!body.ok) throw new Error(body.error ?? "rpc failed");
-    return body.result!;
-  } catch (e: any) {
-    // the owning process went away: take the port over
-    if (e?.cause?.code === "ECONNREFUSED" && (await ensureOwner())) return core!.call(tool, args);
-    throw e;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await forward(tool, args);
+    } catch (e: any) {
+      if (e instanceof RpcError || !ownerGone(e) || attempt >= 1) throw e;
+      // the owning process went away: take the port over, else retry once (someone else did)
+      if (await ensureOwner()) return core!.call(tool, args);
+    }
   }
 }
 
@@ -203,7 +219,7 @@ reg(
   {
     code: z.string(),
     args: z.any().optional(),
-    timeout: z.number().optional().describe("Seconds, default 60"),
+    timeout: z.number().optional().describe("Seconds, default 30; the code is cancelled after that"),
   },
 );
 
@@ -246,6 +262,7 @@ reg(
     file: z.string(),
     format: z.enum(["json", "rbxm"]).optional(),
     keepPosition: z.boolean().optional().describe("JSON: keep the world origin (default true)"),
+    overwrite: z.boolean().optional().describe("Allow replacing an existing file outside the working folder / sync project"),
   },
 );
 
