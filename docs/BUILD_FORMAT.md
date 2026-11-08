@@ -1,3 +1,5 @@
+> To look at and edit the place, prefer the file mirror (`mirror_start {dir}`, then your normal file tools; see `AGENTS.md` in that folder).
+
 # RoLink build format
 
 The `build` tool takes an array of **nodes**. `inspect` and `export` return the same format, so anything in Studio can be read, edited and rebuilt.

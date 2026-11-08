@@ -9,6 +9,7 @@ import { getApi } from "./apidump.js";
 import { log } from "./config.js";
 import { captureStudio, cropToMarkers, downscale, toJpeg } from "./screenshot.js";
 import { Project, SyncSession, findProjectFile } from "./sync.js";
+import { DEFAULT_SERVICES, MirrorSession, projectServices } from "./mirror.js";
 import { randomUUID } from "node:crypto";
 import { PREVIEW_EXTS, UPLOAD_EXTS, loadModel, prepareChunks, validateModelPath } from "./meshimport.js";
 import { uploadConfig, uploadModel } from "./assetupload.js";
@@ -28,17 +29,22 @@ type Args = Record<string, any>;
 export class Core {
   readonly bridge: Bridge;
   private sync?: SyncSession;
+  private mirror?: MirrorSession;
   private shotLock = Promise.resolve();
 
   constructor(bridge: Bridge) {
     this.bridge = bridge;
     bridge.apiProvider = () => getApi();
     bridge.on("plugin-event", (s: SessionInfo, ev: any) => {
+      if (ev.type === "mirror_delta" && this.mirror && s.context === "edit" && s.placeName === this.mirror.placeName) this.mirror.onDelta(ev);
       if (this.sync && s.context === "edit" && (ev.type === "source" || ev.type === "created")) {
         this.sync.onPluginEvent(ev).catch((e) => log("sync event failed", e));
       }
     });
     bridge.on("session", (s: SessionInfo) => {
+      if (this.mirror && s.context === "edit" && s.placeName === this.mirror.placeName) {
+        setTimeout(() => this.mirror?.resync().catch((e) => log("mirror resync failed", e.message)), 500);
+      }
       // Studio reconnected (or was reopened): push the project again
       if (this.sync && s.context === "edit" && s.placeName === this.sync.placeName) {
         setTimeout(() => this.sync?.fullSync().catch((e) => log("resync failed", e.message)), 500);
@@ -112,6 +118,12 @@ export class Core {
         return this.syncStop();
       case "sync_status":
         return json(this.sync ? this.sync.status() : { active: false });
+      case "mirror_start":
+        return this.mirrorStart(args);
+      case "mirror_stop":
+        return this.mirrorStop();
+      case "mirror_status":
+        return json(this.mirror ? this.mirror.status() : { active: false });
     }
     throw new Error(`unknown tool ${tool}`);
   }
@@ -129,6 +141,7 @@ export class Core {
       const st = this.sync.status();
       lines.push(`Sync: ${st.project} (${st.root}) → ${st.place}, ${st.items} items`);
     } else lines.push("Sync: off");
+    lines.push(this.mirror ? `Mirror: ${this.mirror.root} -> ${this.mirror.placeName}` : "Mirror: off");
     return { text: lines.join("\n") };
   }
 
@@ -297,6 +310,7 @@ export class Core {
     const projectFile = fs.existsSync(dir) && fs.statSync(dir).isFile() ? dir : findProjectFile(dir);
     if (!projectFile) throw new Error(`no *.project.json in ${dir}`);
     const s = this.session(args);
+    if (this.mirror) this.assertNoOverlap(projectFile, this.mirror.services);
     if (this.sync) await this.sync.stop();
     let api;
     try {
@@ -315,6 +329,39 @@ export class Core {
       this.sync = undefined;
       throw e;
     }
+  }
+
+  private assertNoOverlap(projectFile: string, mirrored: string[]) {
+    const mapped = projectServices(projectFile);
+    const shared = mapped === null ? mirrored : mapped.filter((m) => mirrored.includes(m));
+    if (shared.length) {
+      throw new Error(`mirror and sync cannot run on the same content (${shared.join(", ")}): stop one first with mirror_stop or sync_stop`);
+    }
+  }
+
+  private async mirrorStart(args: Args): Promise<ToolResult> {
+    if (this.mirror) throw new Error(`a mirror is already running at ${this.mirror.root}; call mirror_stop first`);
+    if (typeof args.dir !== "string" || !args.dir) throw new Error("dir is required");
+    const services: string[] = args.services?.length ? args.services : DEFAULT_SERVICES;
+    if (this.sync) this.assertNoOverlap(this.sync.project.file, services);
+    const s = this.session(args);
+    const send = (op: string, payload: unknown, t?: number) => this.bridge.send(this.bridge.pick("edit", s.placeName).id, op, payload, t);
+    const m = new MirrorSession({ dir: args.dir, services, deleteThreshold: args.deleteThreshold }, send, s.placeName);
+    this.mirror = m;
+    try {
+      return json(await m.start());
+    } catch (e) {
+      this.mirror = undefined;
+      await m.stop().catch(() => {});
+      throw e;
+    }
+  }
+
+  private async mirrorStop(): Promise<ToolResult> {
+    if (!this.mirror) return { text: "mirror was not running" };
+    await this.mirror.stop();
+    this.mirror = undefined;
+    return { text: "mirror stopped; the files stay on disk but are no longer live" };
   }
 
   private async syncStop(): Promise<ToolResult> {

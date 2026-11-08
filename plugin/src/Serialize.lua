@@ -73,6 +73,13 @@ local function defaultOf(className, prop)
 	return value
 end
 
+-- True when `value` of `prop` equals what a freshly built `className` has.
+function Serialize.isDefault(className, prop, value)
+	local e = enc(value)
+	local d = defaultOf(className, prop)
+	return e == d or (e == nil and d == "\0nil")
+end
+
 local function isScript(inst)
 	return inst:IsA("LuaSourceContainer")
 end
