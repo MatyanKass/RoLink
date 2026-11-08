@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { Bridge, type Context, type SessionInfo } from "./bridge.js";
+import { Bridge, type Context, type SessionBinding, type SessionInfo } from "./bridge.js";
 import { getApi } from "./apidump.js";
 import { log } from "./config.js";
 import { captureStudio, cropToMarkers, downscale, toJpeg } from "./screenshot.js";
@@ -33,30 +33,33 @@ type Args = Record<string, any>;
 export class Core {
   readonly bridge: Bridge;
   private sync?: SyncSession;
+  private syncBinding?: SessionBinding;
   private mirror?: MirrorSession;
+  private mirrorBinding?: SessionBinding;
   private shotLock = Promise.resolve();
   private readonly playtests: Playtests;
 
-  constructor(bridge: Bridge) {
+  constructor(bridge: Bridge, private readonly api: () => Promise<unknown> = getApi) {
     this.bridge = bridge;
     this.playtests = new Playtests(bridge);
-    bridge.apiProvider = () => getApi();
+    bridge.apiProvider = () => this.api();
+    const boundTo = (b: SessionBinding | undefined, s: SessionInfo) => !!b && this.bridge.isBound(b, s.id);
     bridge.on("plugin-event", (s: SessionInfo, ev: any) => {
-      if (ev.type === "mirror_delta" && this.mirror && s.context === "edit" && s.placeName === this.mirror.placeName) this.mirror.onDelta(ev);
-      if (this.sync && s.context === "edit" && (ev.type === "source" || ev.type === "created")) {
+      if (ev.type === "mirror_delta" && this.mirror && boundTo(this.mirrorBinding, s)) this.mirror.onDelta(ev);
+      if (this.sync && boundTo(this.syncBinding, s) && (ev.type === "source" || ev.type === "created")) {
         this.sync.onPluginEvent(ev).catch((e) => log("sync event failed", e));
       }
     });
     bridge.on("session", (s: SessionInfo) => {
-      if (this.mirror && s.context === "edit" && s.placeName === this.mirror.placeName) {
+      if (this.mirror && boundTo(this.mirrorBinding, s)) {
         setTimeout(() => this.mirror?.resync().catch((e) => log("mirror resync failed", e.message)), 500);
       }
-      // Studio reconnected (or was reopened): push the project again
-      if (this.sync && s.context === "edit" && s.placeName === this.sync.placeName) {
+      // Studio reconnected: push the project again
+      if (this.sync && boundTo(this.syncBinding, s)) {
         setTimeout(() => this.sync?.fullSync().catch((e) => log("resync failed", e.message)), 500);
       }
     });
-    getApi().catch((e) => log("API dump unavailable:", e.message));
+    this.api().catch((e) => log("API dump unavailable:", e.message));
   }
 
   private session(args: Args): SessionInfo {
@@ -91,7 +94,7 @@ export class Core {
           await this.op(args, "build", pick(args, ["parent", "items", "origin", "defaults", "replace", "select"]), 180_000),
         );
       case "set":
-        return json(await this.op(args, "set", pick(args, ["edits", "path", "props", "attrs", "tags", "untag", "name", "source"])));
+        return json(await this.op(args, "set", clearNullRefs(pick(args, ["edits", "path", "props", "attrs", "tags", "untag", "name", "source"]))));
       case "delete":
         return json(await this.op(args, "delete", { paths: args.paths ?? args.path }));
       case "clone":
@@ -296,6 +299,8 @@ export class Core {
     }
     const node = JSON.parse(await fsp.readFile(file, "utf8"));
     if (args.cframe) {
+      // whichever placement the file saved would otherwise win over the argument
+      for (const k of ["cf", "origin", "at", "rot"]) delete node[k];
       if (node.class === "Model" || node.children) node.origin = args.cframe;
       else node.cf = args.cframe;
     }
@@ -357,11 +362,10 @@ export class Core {
       api = await getApi();
     } catch {}
     const project = new Project(projectFile, api);
-    const send = (op: string, payload: unknown, t?: number) => {
-      const cur = this.bridge.pick("edit", s.placeName);
-      return this.bridge.send(cur.id, op, payload, t);
-    };
+    const binding = this.bridge.bind(s.id);
+    const send = async (op: string, payload: unknown, t?: number) => this.bridge.send(this.bridge.resolve(binding).id, op, payload, t);
     this.sync = new SyncSession(project, send, s.placeName);
+    this.syncBinding = binding;
     try {
       const res = await this.sync.start();
       return json({ syncing: projectFile, place: s.placeName, ...res });
@@ -385,9 +389,16 @@ export class Core {
     const services: string[] = args.services?.length ? args.services : DEFAULT_SERVICES;
     if (this.sync) this.assertNoOverlap(this.sync.project.file, services);
     const s = this.session(args);
-    const send = (op: string, payload: unknown, t?: number) => this.bridge.send(this.bridge.pick("edit", s.placeName).id, op, payload, t);
+    try {
+      await this.api();
+    } catch (e: any) {
+      throw new Error(`mirror_start refused: the Roblox API dump could not be loaded (${e?.message ?? e}). Without it every property would be missing from the files. Check the network connection and try again.`);
+    }
+    const binding = this.bridge.bind(s.id);
+    const send = async (op: string, payload: unknown, t?: number) => this.bridge.send(this.bridge.resolve(binding).id, op, payload, t);
     const m = new MirrorSession({ dir: args.dir, services, deleteThreshold: args.deleteThreshold }, send, s.placeName);
     this.mirror = m;
+    this.mirrorBinding = binding;
     try {
       return json(await m.start());
     } catch (e) {
@@ -410,6 +421,15 @@ export class Core {
     this.sync = undefined;
     return { text: "sync stopped" };
   }
+}
+
+/** A JSON null would vanish on the way into Luau, so it is sent as the explicit "clear" form. */
+function clearNullRefs(a: Args): Args {
+  const fix = (props?: Args) => props && Object.fromEntries(Object.entries(props).map(([k, v]) => [k, v === null ? { ref: false } : v]));
+  const out: Args = { ...a };
+  if (a.props) out.props = fix(a.props);
+  if (Array.isArray(a.edits)) out.edits = a.edits.map((e: Args) => (e?.props ? { ...e, props: fix(e.props) } : e));
+  return out;
 }
 
 function pick(a: Args, keys: string[]) {

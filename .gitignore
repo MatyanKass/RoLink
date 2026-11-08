@@ -4,6 +4,8 @@ server/cache/
 *.log
 .env
 .env.*
+!.env.example
+.claude/
 *.rbxl
 *.rbxlx
 *.lock

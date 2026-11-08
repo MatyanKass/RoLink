@@ -12,7 +12,11 @@ local Mirror = require(Root.Mirror)
 
 local VERSION = "0.1.0"
 local DEFAULT_PORT = 34872
-local CHUNK = 900 * 1024
+-- A request body may be 1 MB. Each piece is JSON-encoded again inside the envelope, which
+-- grows ordinary text by about 1.21x; a piece that grows past POST_LIMIT is halved.
+local CHUNK = 700 * 1024
+local POST_LIMIT = 960 * 1024
+local POST_ATTEMPTS = 3
 
 local context = RunService:IsEdit() and "edit" or (RunService:IsServer() and "server" or "client")
 local port = plugin:GetSetting("RoLinkPort") or DEFAULT_PORT
@@ -68,13 +72,100 @@ local function postJson(path, tbl)
 	return request("POST", path, HttpService:JSONEncode(tbl))
 end
 
+-- Sends and checks the answer. Retries what may pass next time, not what the server refused.
+local function postChecked(path, tbl)
+	local status, detail
+	local body = HttpService:JSONEncode(tbl)
+	for attempt = 1, POST_ATTEMPTS do
+		status, detail = request("POST", path, body)
+		if status == 200 then
+			return true
+		end
+		if status and status >= 400 and status < 500 and status ~= 429 then
+			break
+		end
+		if attempt < POST_ATTEMPTS then
+			task.wait(0.2 * attempt)
+		end
+	end
+	return false, "HTTP " .. tostring(status) .. (type(detail) == "string" and (" " .. detail) or "")
+end
+
+-- Largest cut at or below `stop` that does not split a UTF-8 character.
+local function utf8Cut(text, stop)
+	while stop > 1 do
+		local b = string.byte(text, stop + 1)
+		if b == nil or b < 0x80 or b >= 0xC0 then
+			break
+		end
+		stop -= 1
+	end
+	return stop
+end
+
+-- Pieces of `body` ready to post, each small enough once encoded again.
+local function splitBody(body)
+	local pieces = {}
+	local len = #body
+	local pos = 1
+	while pos <= len do
+		local stop = pos + CHUNK - 1
+		if stop < len then
+			stop = pos - 1 + utf8Cut(string.sub(body, pos, stop + 4), CHUNK)
+		else
+			stop = len
+		end
+		table.insert(pieces, string.sub(body, pos, stop))
+		pos = stop + 1
+	end
+	local i = 1
+	while i <= #pieces do
+		local piece = pieces[i]
+		if #piece > 1024 and #HttpService:JSONEncode(piece) > POST_LIMIT then
+			local half = utf8Cut(piece, math.floor(#piece / 2))
+			pieces[i] = string.sub(piece, 1, half)
+			table.insert(pieces, i + 1, string.sub(piece, half + 1))
+		else
+			i += 1
+		end
+	end
+	if #pieces == 0 then
+		pieces[1] = ""
+	end
+	return pieces
+end
+
+local eventSeq = 0
+
 local function sendEvent(kind, payload)
 	if not session then
 		return
 	end
 	payload.s = session
 	payload.type = kind
-	postJson("/plugin/event", payload)
+	local okEnc, body = pcall(function()
+		return HttpService:JSONEncode(payload)
+	end)
+	if not okEnc then
+		log("could not encode " .. kind .. ": " .. tostring(body))
+		return
+	end
+	local sent, why
+	if #body <= CHUNK then
+		sent, why = postChecked("/plugin/event", payload)
+	else
+		eventSeq += 1
+		local pieces = splitBody(body)
+		for i, piece in pieces do
+			sent, why = postChecked("/plugin/event", { s = session, type = "chunk", id = tostring(eventSeq), chunk = i - 1, chunks = #pieces, data = piece })
+			if not sent then
+				break
+			end
+		end
+	end
+	if not sent then
+		log("could not send " .. kind .. ": " .. tostring(why))
+	end
 end
 
 -- ----------------------------------------------------------------- results
@@ -89,31 +180,13 @@ local function postResult(id, ok, result)
 	if not okEnc then
 		body = HttpService:JSONEncode({ ok = false, error = "result is not JSON-encodable: " .. tostring(body) })
 	end
-	-- split on UTF-8 boundaries: never cut inside a multibyte character
-	local pieces = {}
-	local len = #body
-	local pos = 1
-	while pos <= len do
-		local stop = math.min(pos + CHUNK - 1, len)
-		if stop < len then
-			-- move back while the next byte is a continuation byte (10xxxxxx)
-			while stop > pos do
-				local b = string.byte(body, stop + 1)
-				if b < 0x80 or b >= 0xC0 then
-					break
-				end
-				stop -= 1
-			end
-		end
-		table.insert(pieces, string.sub(body, pos, stop))
-		pos = stop + 1
-	end
-	if #pieces == 0 then
-		pieces[1] = ""
-	end
+	local pieces = splitBody(body)
 	local n = #pieces
 	for i, piece in pieces do
-		postJson("/plugin/result", { s = session, id = id, chunk = i - 1, chunks = n, data = piece })
+		local sent, why = postChecked("/plugin/result", { s = session, id = id, chunk = i - 1, chunks = n, data = piece })
+		if not sent then
+			error("chunk " .. i .. "/" .. n .. ": " .. tostring(why), 0)
+		end
 	end
 end
 
@@ -160,6 +233,18 @@ end
 
 -- ----------------------------------------------------------------- connection
 
+local function ensureApi()
+	if Api.loaded() then
+		return true
+	end
+	local st, api = request("GET", "/plugin/api")
+	if st == 200 and api then
+		Api.load(api)
+		return true
+	end
+	return false
+end
+
 local function hello()
 	local status, data = postJson("/plugin/hello", {
 		context = context,
@@ -174,13 +259,8 @@ local function hello()
 	end
 	session = data.session
 	prevSession = nil
-	if not Api.loaded() then
-		local st, api = request("GET", "/plugin/api")
-		if st == 200 and api then
-			Api.load(api)
-		else
-			log("warning: could not load class table from server")
-		end
+	if not ensureApi() then
+		log("warning: could not load class table from server")
 	end
 	log("connected (server " .. tostring(data.serverVersion) .. ")")
 	setStatus("Connected")
@@ -256,7 +336,7 @@ end
 
 Ops.init(plugin)
 Sync.init(sendEvent)
-Mirror.init(sendEvent, plugin)
+Mirror.init(sendEvent, plugin, ensureApi)
 
 plugin.Unloading:Connect(function()
 	wantConnected = false

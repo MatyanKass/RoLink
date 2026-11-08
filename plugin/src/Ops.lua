@@ -253,7 +253,11 @@ function Ops.find(args)
 	local nameQ = args.name and string.lower(args.name)
 	local namePattern = nameQ and string.sub(nameQ, 1, 1) == "^"
 	local textQ = args.text
-	local near = args.near and Codec.vector3(args.near.point or args.near[1] or args.near)
+	local nearSpec = args.near
+	if type(nearSpec) == "table" and (nearSpec.point or type(nearSpec[1]) == "table") then
+		nearSpec = nearSpec.point or nearSpec[1] -- { point = p, radius = r } or { p }; otherwise it is [x, y, z]
+	end
+	local near = args.near and Codec.vector3(nearSpec)
 	local radius = args.near and tonumber(args.near.radius or args.radius) or nil
 	local wmin = args.within and Codec.vector3(args.within.min or args.within[1])
 	local wmax = args.within and Codec.vector3(args.within.max or args.within[2])
@@ -424,6 +428,31 @@ function Ops.build(args)
 	}
 end
 
+-- Same meaning as in the mirror's files: "." and "./x" are relative to the enclosing
+-- Model or GUI. Anything else is tried below the instance, then from the root.
+local function refBase(inst)
+	local cur = inst
+	while cur and cur ~= game do
+		if cur:IsA("Model") or cur:IsA("LayerCollector") then
+			return cur
+		end
+		cur = cur.Parent
+	end
+	return nil
+end
+
+local function resolveSetRef(inst, ref)
+	if ref == "." then
+		return refBase(inst) or inst
+	end
+	if type(ref) == "string" and string.sub(ref, 1, 2) == "./" then
+		local rel = string.sub(ref, 3)
+		local base = refBase(inst)
+		return (base and Paths.resolve(rel, base)) or Paths.resolve(rel, inst)
+	end
+	return Paths.resolve(ref, inst) or Paths.resolve(ref)
+end
+
 function Ops.set(args)
 	local edits = args.edits
 	if not edits then
@@ -438,8 +467,17 @@ function Ops.set(args)
 				inst.Name = e.name
 			end
 			for prop, val in e.props or {} do
-				if type(val) == "table" and val.ref ~= nil then
-					local target = Paths.resolve(val.ref, inst) or Paths.resolve(val.ref)
+				local clearsRef = type(val) == "table"
+					and (val.ref == false or (next(val) == nil and Api.propType(inst.ClassName, prop) == "ref"))
+				if clearsRef then
+					local ok, err = pcall(function()
+						inst[prop] = nil
+					end)
+					if not ok then
+						table.insert(warnings, where .. "." .. prop .. ": " .. tostring(err))
+					end
+				elseif type(val) == "table" and val.ref ~= nil then
+					local target = resolveSetRef(inst, val.ref)
 					if not target then
 						table.insert(warnings, where .. ": ref not found " .. tostring(val.ref))
 					else
@@ -655,7 +693,7 @@ function Ops.run(args)
 		fn = function()
 			return f()
 		end
-	elseif okLs and compileErr then
+	elseif okLs and compileErr and not string.find(tostring(compileErr), "loadstring", 1, true) then
 		error("compile error: " .. tostring(compileErr), 0)
 	else
 		-- loadstring unavailable: compile through a ModuleScript

@@ -219,6 +219,16 @@ local function spanPlacement(n, frame)
 	return cf, len, w, h
 end
 
+-- AssetService:CreateMeshPartAsync takes a Content, not a string.
+function Build.meshPart(id)
+	local uri = tostring(id)
+	if not string.find(uri, "://", 1, true) then
+		uri = "rbxassetid://" .. uri
+	end
+	return AssetService:CreateMeshPartAsync(Content.fromUri(uri))
+end
+
+-- nil only when a mesh could not be made: a block in its place would look like success.
 local function makeInstance(ctx, n, cls, where)
 	if n.asset then
 		local id = tostring(n.asset)
@@ -236,18 +246,12 @@ local function makeInstance(ctx, n, cls, where)
 		return m
 	end
 	if n.mesh then
-		local id = tostring(n.mesh)
-		if not string.find(id, "://", 1, true) then
-			id = "rbxassetid://" .. id
-		end
-		local ok, mp = pcall(function()
-			return AssetService:CreateMeshPartAsync(id)
-		end)
+		local ok, mp = pcall(Build.meshPart, n.mesh)
 		if ok and mp then
 			return mp
 		end
-		warn_(ctx, where, "mesh " .. id .. " failed to load (" .. tostring(mp) .. "), using a Part")
-		return Instance.new("Part")
+		warn_(ctx, where, "mesh " .. tostring(n.mesh) .. " could not be created (" .. tostring(mp) .. "); this node and its children were skipped")
+		return nil
 	end
 	local ok, inst = pcall(Instance.new, cls)
 	if not ok then
@@ -267,6 +271,10 @@ local function doCsg(ctx, base, n, baseCF, mirrors, where)
 	for i, wn in spec.with or {} do
 		local cls = classOf(wn)
 		local p = makeInstance(ctx, wn, cls, where .. "/csg[" .. i .. "]")
+		if not p then
+			temp:Destroy()
+			error(where .. "/csg[" .. i .. "]: mesh could not be created", 0)
+		end
 		Serialize.applyBuilderDefaults(p)
 		if wn.shape and p:IsA("Part") then
 			local s = SHAPES[string.lower(wn.shape)]
@@ -346,6 +354,9 @@ local function buildVariant(ctx, n, v, parent, frame, mirrors, where, isTop)
 	end
 	local cls = classOf(n)
 	local inst = makeInstance(ctx, n, cls, where)
+	if not inst then
+		return nil
+	end
 	inst.Name = nameFor(n, inst.ClassName, v.index)
 	where = where .. "/" .. inst.Name
 
@@ -501,7 +512,10 @@ function buildNode(ctx, n, parent, frame, mirrors, where, isTop)
 	end
 	local out = {}
 	for _, v in variants(n) do
-		table.insert(out, buildVariant(ctx, n, v, parent, frame, mirrors, where, isTop))
+		local inst = buildVariant(ctx, n, v, parent, frame, mirrors, where, isTop)
+		if inst then
+			table.insert(out, inst)
+		end
 	end
 	return out
 end
@@ -540,7 +554,8 @@ end
 ]]
 function Build.run(parent, items, opts)
 	opts = opts or {}
-	if type(items) == "table" and (items.class or items.name or items.children or items.size) then
+	-- a lone node can consist of any keys; an array always has [1] (an empty one builds nothing)
+	if type(items) == "table" and next(items) ~= nil and items[1] == nil then
 		items = { items }
 	end
 	local defaults = {}

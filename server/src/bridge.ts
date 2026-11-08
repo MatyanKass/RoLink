@@ -44,9 +44,20 @@ interface Session extends SessionInfo {
   pending: Map<string, Pending>;
   /** id of the live session for this place that it arrived behind */
   duplicateOf?: string;
+  /** the same for every session of one plugin connection, across reconnects */
+  lineage: string;
+  /** large events still being received, by event id */
+  eventChunks: Map<string, { parts: string[]; got: number; bytes: number }>;
 }
 
 export class PluginError extends Error {}
+
+/** One Studio's edit session across reconnects. Opaque to callers; see Bridge.bind. */
+export interface SessionBinding {
+  lineage: string;
+  placeId: number;
+  placeName: string;
+}
 
 /** Where the port owner stores the /rpc token (user-only file in the user's temp dir). */
 export function tokenFile(port = PORT) {
@@ -75,12 +86,16 @@ const LIVE_WINDOW_MS = POLL_HOLD_MS + 5_000;
 
 const MAX_CHUNKS = 1000;
 const MAX_RESULT_BYTES = 256 * 1024 * 1024;
+const MAX_OPEN_EVENTS = 16;
+/** lineages of closed sessions, so a reconnect that arrives after the drop still follows its `replaces` */
+const MAX_RETIRED = 1024;
 
 type RpcHandler = (tool: string, args: unknown) => Promise<unknown>;
 type ApiProvider = () => Promise<unknown>;
 
 export class Bridge extends EventEmitter {
   private sessions = new Map<string, Session>();
+  private retired = new Map<string, string>();
   private server?: http.Server;
   rpcHandler?: RpcHandler;
   /** required in the x-rolink-token header of POST /rpc */
@@ -158,6 +173,28 @@ export class Bridge extends EventEmitter {
     return publicInfo(s);
   }
 
+  /** Ties long-lived work (a mirror, a sync) to this Studio, so it is never re-chosen by name. */
+  bind(sessionId: string): SessionBinding {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new PluginError("Studio session disconnected");
+    return { lineage: s.lineage, placeId: s.placeId, placeName: s.placeName };
+  }
+
+  private bound(b: SessionBinding): Session | undefined {
+    return [...this.sessions.values()].find((s) => s.context === "edit" && !s.duplicateOf && s.lineage === b.lineage && s.placeId === b.placeId);
+  }
+
+  /** The bound Studio's current session: exact place id and the same line of reconnects. */
+  resolve(b: SessionBinding): SessionInfo {
+    const s = this.bound(b);
+    if (!s) throw new PluginError(`The Studio session for "${b.placeName}" (place ${b.placeId}) is no longer connected. If it was closed, stop and start this again on the open Studio.`);
+    return publicInfo(s);
+  }
+
+  isBound(b: SessionBinding, sessionId: string): boolean {
+    return this.bound(b)?.id === sessionId;
+  }
+
   send(sessionId: string, op: string, args: unknown, timeoutMs = COMMAND_TIMEOUT_MS): Promise<any> {
     const s = this.sessions.get(sessionId);
     if (!s) return Promise.reject(new PluginError("Studio session disconnected"));
@@ -192,6 +229,8 @@ export class Bridge extends EventEmitter {
 
   private drop(s: Session, why: string, promote = true) {
     this.sessions.delete(s.id);
+    this.retired.set(s.id, s.lineage);
+    if (this.retired.size > MAX_RETIRED) this.retired.delete(this.retired.keys().next().value!);
     for (const p of s.pending.values()) {
       clearTimeout(p.timer);
       p.reject(new PluginError(`Studio session closed (${why}) while running "${p.op}"`));
@@ -246,6 +285,9 @@ export class Bridge extends EventEmitter {
         // the same plugin coming back: whatever waited behind the old session waits behind the new one
         const replaced = b.replaces ? this.sessions.get(b.replaces) : undefined;
         if (replaced) this.drop(replaced, "reconnected", false);
+        // session ids are never published, so naming one proves this is the same plugin coming back
+        const inherited = typeof b.replaces === "string" ? this.retired.get(b.replaces) : undefined;
+        if (inherited) this.retired.delete(b.replaces!);
         const now = Date.now();
         const s: Session = {
           id: randomUUID(),
@@ -258,6 +300,8 @@ export class Bridge extends EventEmitter {
           lastSeen: now,
           queue: [],
           pending: new Map(),
+          lineage: inherited ?? randomUUID(),
+          eventChunks: new Map(),
         };
         if (s.context === "edit") s.duplicateOf = this.liveSessionFor(s.placeId)?.id;
         this.sessions.set(s.id, s);
@@ -356,10 +400,16 @@ export class Bridge extends EventEmitter {
       }
 
       case "POST /plugin/event": {
-        const b = (await readJson(req)) as { s: string; type: string; [k: string]: unknown };
+        let b = (await readJson(req)) as { s: string; type: string; [k: string]: unknown };
         const s = this.sessions.get(b.s);
         if (!s) return sendJson(res, 410, { error: "unknown session" });
         s.lastSeen = Date.now();
+        if (b.type === "chunk") {
+          const r = addEventChunk(s, b);
+          if (r.error) return sendJson(res, 400, { error: r.error });
+          if (r.event === undefined) return sendJson(res, 200, { ok: true });
+          b = { ...r.event, s: b.s };
+        }
         if (!s.duplicateOf) this.emit("plugin-event", publicInfo(s), b);
         return sendJson(res, 200, { ok: true });
       }
@@ -393,6 +443,39 @@ export class Bridge extends EventEmitter {
   }
 }
 
+/** Events too big for one request arrive as string pieces of one JSON document, like results. */
+function addEventChunk(s: Session, b: Record<string, unknown>): { error?: string; event?: { type: string; [k: string]: unknown } } {
+  const { id, chunk, chunks, data } = b;
+  if (typeof id !== "string" || !Number.isInteger(chunks) || !Number.isInteger(chunk) || (chunks as number) < 1 || (chunks as number) > MAX_CHUNKS || (chunk as number) < 0 || (chunk as number) >= (chunks as number)) {
+    return { error: "invalid event chunk" };
+  }
+  if (typeof data !== "string") return { error: "event chunk without data" };
+  let open = s.eventChunks.get(id);
+  if (!open) {
+    open = { parts: [], got: 0, bytes: 0 };
+    s.eventChunks.set(id, open);
+    if (s.eventChunks.size > MAX_OPEN_EVENTS) s.eventChunks.delete(s.eventChunks.keys().next().value!);
+  }
+  const i = chunk as number;
+  if (open.parts[i] === undefined) open.got++;
+  open.bytes += data.length - (open.parts[i]?.length ?? 0);
+  open.parts[i] = data;
+  if (open.bytes > MAX_RESULT_BYTES) {
+    s.eventChunks.delete(id);
+    return { error: "event too large" };
+  }
+  if (open.got < (chunks as number)) return {};
+  s.eventChunks.delete(id);
+  let event: unknown;
+  try {
+    event = JSON.parse(open.parts.slice(0, chunks as number).join(""));
+  } catch (e: any) {
+    return { error: `event is not valid JSON (${e?.message ?? e})` };
+  }
+  if (!event || typeof event !== "object" || typeof (event as { type?: unknown }).type !== "string") return { error: "event is not an object with a type" };
+  return { event: event as { type: string } };
+}
+
 function publicInfo(s: Session | SessionInfo): SessionInfo {
   const { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen } = s;
   // a flag, not the other session's id: ids are the plugin routes' only credential
@@ -400,7 +483,7 @@ function publicInfo(s: Session | SessionInfo): SessionInfo {
   return { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen, ...duplicate };
 }
 
-const MAX_BODY = 64 * 1024 * 1024; // results are chunked at ~900 KB; import_model sends only paths
+const MAX_BODY = 64 * 1024 * 1024; // results and large events are chunked at ~700 KB; import_model sends only paths
 
 function readJson(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {

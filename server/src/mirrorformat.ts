@@ -739,7 +739,8 @@ The owner of a sub-file is a part path inside the model, parts joined with "+":
   is absolute, null clears. They are resolved after the whole batch exists.
 - A property absent from a file is left alone (and absent usually means default:
   parts default to Anchored=true with smooth surfaces). Mesh data and anything else
-  the JSON cannot express is preserved.
+  the JSON cannot express is preserved. \`MeshId\` on a MeshPart is read-only: it is shown,
+  and a new MeshPart needs it, but changing it on an existing one is rejected.
 - \`attrs\` and \`tags\`, when present, are the complete set: a key you drop is removed.
 - \`Pivot\` on a model moves the whole model (WORLD frame). Part CFrames are WORLD too.
 - \`_info\` in model.json is read-only and regenerated: joints, attached objects,

@@ -2,6 +2,7 @@
 // rolink-publish: MCP server (stdio) that publishes assets to Roblox through
 // Open Cloud. There is deliberately no tool that changes experience privacy.
 
+import { installProcessGuards } from "./guard.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -181,7 +182,8 @@ async function main() {
   app.poller.start();
 }
 
-main().catch((e) => {
+const guards = installProcessGuards((...a) => app.log(...a));
+main().then(() => guards.ready()).catch((e) => {
   app.log("fatal", e);
   process.exit(1);
 });

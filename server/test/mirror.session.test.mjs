@@ -334,6 +334,258 @@ test("a non-empty folder that is not a mirror is refused", async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// ---------------------------------------------------------------- deltas split across events
+
+const part = (i, p) => ({ i, p, c: "Part", n: `P${i}`, props: { CFrame: CF(0), Size: [1, 1, 1] } });
+
+test("children that arrive a whole delta before their parent are kept", () =>
+  withMirror(async ({ m, studio, read }) => {
+    const ws = studio.find("Workspace").i;
+    const before = m.status().instances;
+    const big = 5000;
+    m.onDelta({ upserts: Array.from({ length: 300 }, (_, k) => part(6000 + k, big)) });
+    await sleep(60);
+    assert.equal(m.status().instances, before, "held back until the parent exists");
+    m.onDelta({ upserts: [{ i: big, p: ws, c: "Model", n: "Big", props: {} }, ...Array.from({ length: 50 }, (_, k) => part(7000 + k, big))] });
+    await until(() => m.status().instances === before + 351, `351 sent, ${m.status().instances - before} kept`);
+    await until(() => {
+      try {
+        return JSON.parse(read("Workspace", "Big.model", "model.json")).children.length === 350;
+      } catch {
+        return false;
+      }
+    }, "all children in model.json");
+  }));
+
+test("held orphans chain up through several levels and take their newest state", () =>
+  withMirror(async ({ m, studio }) => {
+    const ws = studio.find("Workspace").i;
+    const before = m.status().instances;
+    m.onDelta({ upserts: [{ i: 8002, p: 8001, c: "Folder", n: "Old", props: {} }] });
+    m.onDelta({ upserts: [{ i: 8002, p: 8001, c: "Folder", n: "Grand", props: {} }, { i: 8003, p: 8002, c: "Folder", n: "Leaf", props: {} }] });
+    await sleep(40);
+    m.onDelta({ upserts: [{ i: 8001, p: ws, c: "Folder", n: "Top", props: {} }] });
+    await until(() => m.status().instances === before + 3, "chain attached");
+    assert.equal(m.status().heldOrphans, 0);
+  }));
+
+test("an orphan whose parent is removed is forgotten", () =>
+  withMirror(async ({ m, studio }) => {
+    const ws = studio.find("Workspace").i;
+    const before = m.status().instances;
+    m.onDelta({ upserts: [{ i: 8102, p: 8101, c: "Folder", n: "Kid", props: {} }, { i: 8103, p: 8102, c: "Folder", n: "GrandKid", props: {} }] });
+    await until(() => m.status().heldOrphans === 2, "held");
+    m.onDelta({ removed: [8101] });
+    await until(() => m.status().heldOrphans === 0, "forgotten");
+    m.onDelta({ upserts: [{ i: 8101, p: ws, c: "Folder", n: "Back", props: {} }] });
+    await until(() => m.status().instances === before + 1, "only the parent came back");
+  }));
+
+test("held orphans are bounded", () =>
+  withMirror(async ({ m }) => {
+    for (let n = 0; n < 12; n++) m.onDelta({ upserts: Array.from({ length: 2000 }, (_, k) => ({ i: 100_000 + n * 2000 + k, p: 99_999, c: "Folder", n: "x", props: {} })) });
+    await until(() => m.status().heldOrphans > 0, "held");
+    await sleep(60);
+    assert.equal(m.status().heldOrphans, 20_000);
+    assert.match(m.status().recentErrors.join("\n"), /waiting for a parent/);
+  }));
+
+// ---------------------------------------------------------------- GUI placement and MeshId
+
+test("GUI Position and Rotation round-trip through gui.json", () =>
+  withMirror(async ({ m, studio, f, read }) => {
+    const panel = studio.find("Panel");
+    panel.props.Position = [0.5, -150, 0, 20];
+    panel.props.Rotation = 15;
+    m.onDelta({ upserts: [studio.wire(panel.i)] });
+    await until(() => JSON.parse(read("StarterGui", "Hud.gui", "gui.json")).children[0].Position?.[1] === -150, "written");
+    const doc = JSON.parse(read("StarterGui", "Hud.gui", "gui.json"));
+    assert.equal(doc.children[0].Rotation, 15);
+    doc.children[0].Position = [0.5, -100, 0, 20];
+    fs.writeFileSync(f("StarterGui", "Hud.gui", "gui.json"), JSON.stringify(doc));
+    await until(() => studio.applies.length === 1, "applied");
+    assert.deepEqual(studio.applies[0], [{ op: "set", id: panel.i, props: { Position: [0.5, -100, 0, 20] } }]);
+  }));
+
+test("MeshId is shown in files, and changing it on an existing MeshPart is refused", () =>
+  withMirror(async ({ m, studio, f, read }) => {
+    const tower = studio.find("Tower").i;
+    const mesh = studio.add(tower, "MeshPart", "Crate", { props: { CFrame: CF(1), Size: [1, 1, 1], MeshId: "rbxassetid://5" } });
+    m.onDelta({ upserts: [studio.wire(mesh)] });
+    const file = f("Workspace", "Tower.model", "model.json");
+    const crate = (doc) => doc.children.find((c) => c.name === "Crate");
+    await until(() => crate(JSON.parse(read("Workspace", "Tower.model", "model.json")))?.MeshId === "rbxassetid://5", "shown");
+    const doc = JSON.parse(read("Workspace", "Tower.model", "model.json"));
+    crate(doc).MeshId = "rbxassetid://6";
+    crate(doc).Size = [2, 2, 2];
+    fs.writeFileSync(file, JSON.stringify(doc));
+    await until(() => errorsLog(read).includes("MeshId"), "refusal logged");
+    assert.match(errorsLog(read), /read-only/);
+    await until(() => studio.applies.length === 1, "the other edit still applied");
+    assert.deepEqual(studio.applies[0], [{ op: "set", id: mesh, props: { Size: [2, 2, 2] } }]);
+    await until(() => crate(JSON.parse(read("Workspace", "Tower.model", "model.json")))?.MeshId === "rbxassetid://5", "file restored");
+  }));
+
+test("a new MeshPart in a file still sends its MeshId", () =>
+  withMirror(async ({ studio, f }) => {
+    fs.writeFileSync(f("Workspace", "Rock.MeshPart.json"), JSON.stringify({ MeshId: "rbxassetid://9", Size: [1, 1, 1] }));
+    await until(() => studio.find("Rock"), "created");
+    assert.equal(studio.applies[0][0].props.MeshId, "rbxassetid://9");
+  }));
+
+// ---------------------------------------------------------------- directories for existing instances
+
+test("a plain directory adopts the existing instance of that name", () =>
+  withMirror(async ({ m, studio, f, read }) => {
+    const sg = studio.find("StarterGui").i;
+    const sps = studio.add(sg, "StarterPlayerScripts", "StarterPlayerScripts");
+    m.onDelta({ upserts: [studio.wire(sps)] });
+    await until(() => fs.existsSync(f("StarterGui", "StarterPlayerScripts.StarterPlayerScripts.json")), "rendered as a file");
+    fs.mkdirSync(f("StarterGui", "StarterPlayerScripts"));
+    fs.writeFileSync(f("StarterGui", "StarterPlayerScripts", "Hello.client.luau"), "print('hi')\n");
+    await until(() => studio.find("Hello"), "script created");
+    assert.equal(studio.find("Hello").p, sps);
+    assert.equal(studio.applies.flat().filter((o) => o.op === "create").length, 1, JSON.stringify(studio.applies));
+    await until(() => fs.existsSync(f("StarterGui", "StarterPlayerScripts.StarterPlayerScripts", "Hello.client.luau")), "laid out under the instance's directory");
+    await until(() => !fs.existsSync(f("StarterGui", "StarterPlayerScripts.StarterPlayerScripts.json")), "the single file is folded away");
+    assert.ok(!errorsLog(read).includes("REJECTED"), errorsLog(read));
+  }));
+
+test("Name.Class/ next to Name.Class.json adopts the instance instead of making a second one", () =>
+  withMirror(async ({ studio, f, read }) => {
+    const plate = studio.find("Baseplate").i;
+    const parts = () => [...studio.nodes.values()].filter((n) => n.n === "Baseplate").length;
+    fs.mkdirSync(f("Workspace", "Baseplate.Part"));
+    fs.writeFileSync(f("Workspace", "Baseplate.Part", "Spin.server.luau"), "-- spin\n");
+    await until(() => studio.find("Spin"), "script created");
+    assert.equal(studio.find("Spin").p, plate);
+    assert.equal(parts(), 1);
+    await until(() => !fs.existsSync(f("Workspace", "Baseplate.Part.json")), "single file folded away");
+    await until(() => fs.existsSync(f("Workspace", "Baseplate.Part", "_props.json")), "props file written");
+    assert.deepEqual(JSON.parse(read("Workspace", "Baseplate.Part", "_props.json")).Size, [512, 20, 512]);
+  }));
+
+test("an empty Name.Class/ survives until its first file arrives", () =>
+  withMirror(async ({ studio, f }) => {
+    const plate = studio.find("Baseplate").i;
+    fs.mkdirSync(f("Workspace", "Baseplate.Part"));
+    await sleep(700);
+    assert.ok(fs.existsSync(f("Workspace", "Baseplate.Part")), "not removed under the agent");
+    assert.equal(studio.applies.length, 0);
+    assert.ok(fs.existsSync(f("Workspace", "Baseplate.Part.json")));
+    fs.writeFileSync(f("Workspace", "Baseplate.Part", "Late.server.luau"), "-- late\n");
+    await until(() => studio.find("Late"), "script created");
+    assert.equal(studio.find("Late").p, plate);
+  }));
+
+test("a plain directory with no matching instance is still a new Folder", () =>
+  withMirror(async ({ studio, f }) => {
+    fs.mkdirSync(f("Workspace", "Brand"));
+    await until(() => studio.find("Brand"), "created");
+    assert.equal(studio.find("Brand").c, "Folder");
+  }));
+
+test("a plain directory does not adopt a script of the same name", () =>
+  withMirror(async ({ studio, f }) => {
+    fs.mkdirSync(f("ReplicatedStorage", "Util"));
+    await until(() => studio.find("Util") && [...studio.nodes.values()].some((n) => n.n === "Util" && n.c === "Folder"), "a Folder beside the script");
+  }));
+
+// ---------------------------------------------------------------- a failed apply
+
+function failNextApply(studio) {
+  const real = studio.send;
+  let armed = true;
+  studio.dumps = 0;
+  const send = async (op, args) => {
+    if (op === "mirror" && args.action === "start") studio.dumps++;
+    if (op === "mirror_apply" && armed) {
+      armed = false;
+      throw new Error("Studio did not answer");
+    }
+    return real(op, args);
+  };
+  return send;
+}
+
+async function withFlakyMirror(wrap, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const studio = place();
+  const m = new MirrorSession({ dir, services: ["Workspace", "ReplicatedStorage", "StarterGui"], debounceMs: 30 }, wrap(studio), "P");
+  await m.start();
+  const f = (...p) => path.join(dir, ...p);
+  const read = (...p) => fs.readFileSync(f(...p), "utf8");
+  try {
+    await fn({ m, studio, dir, f, read });
+  } finally {
+    await m.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a failed mirror_apply reloads from Studio, so a local delete does not stick", () =>
+  withFlakyMirror(failNextApply, async ({ m, studio, f, read }) => {
+    const before = m.status().instances;
+    assert.equal(studio.dumps, 1);
+    fs.rmSync(f("Workspace", "Baseplate.Part.json"));
+    await until(() => studio.dumps === 2, "reloaded after the failure");
+    await until(() => fs.existsSync(f("Workspace", "Baseplate.Part.json")), "file back, as Studio still has it");
+    assert.equal(m.status().instances, before);
+    assert.match(errorsLog(read), /could not apply/);
+  }));
+
+test("a failed mirror_apply puts a new instance's file state back in line with Studio", () =>
+  withFlakyMirror(failNextApply, async ({ m, studio, f }) => {
+    const before = m.status().instances;
+    fs.writeFileSync(f("ReplicatedStorage", "New.server.luau"), "print(1)\n");
+    await until(() => studio.dumps === 2, "reloaded");
+    assert.equal(studio.find("New"), undefined);
+    assert.equal(m.status().instances, before);
+  }));
+
+test("a reload that fails halfway keeps the shadow it had", () =>
+  withFlakyMirror(
+    (studio) => {
+      let fail = false;
+      studio.setFail = (v) => (fail = v);
+      return async (op, args) => {
+        if (op === "mirror" && args.action === "next" && fail) throw new Error("session closed");
+        return studio.send(op, args);
+      };
+    },
+    async ({ m, studio, f }) => {
+      const before = m.status().instances;
+      studio.setFail(true);
+      await assert.rejects(m.resync(), /session closed/);
+      assert.equal(m.status().instances, before);
+      m.onDelta({ upserts: [studio.wire(studio.find("Util").i)] });
+      await sleep(150);
+      assert.ok(fs.existsSync(f("Workspace", "Baseplate.Part.json")), "a later render did not wipe the mirror");
+    },
+  ));
+
+test("a failing background job never becomes an unhandled rejection", async () => {
+  const seen = [];
+  const on = (e) => seen.push(e);
+  process.on("unhandledRejection", on);
+  try {
+    await withFlakyMirror(
+      (studio) => async (op, args) => studio.send(op, args),
+      async ({ m }) => {
+        m.render = async () => {
+          throw new Error("render broke");
+        };
+        m.onDelta({ removed: [] });
+        m.scheduleRender();
+        await sleep(120);
+      },
+    );
+  } finally {
+    process.off("unhandledRejection", on);
+  }
+  assert.deepEqual(seen, []);
+});
+
 // ---------------------------------------------------------------- API coverage
 test("every writable property type in the API dump is handled by the codec", () => {
   const here = path.dirname(fileURLToPath(import.meta.url));

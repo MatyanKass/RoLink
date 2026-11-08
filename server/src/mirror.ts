@@ -29,6 +29,7 @@ import {
   emptyLayout,
   inJson,
   isContainer,
+  isScript,
   layoutTree,
   matchChildren,
   modelChildByTokens,
@@ -77,6 +78,8 @@ const DEFAULT_DELETE_THRESHOLD = 25;
 const MAX_DELETE_THRESHOLD = 100;
 const DEFAULT_DESTROY_BUDGET = 100;
 const DEFAULT_DESTROY_WINDOW_MS = 60_000;
+/** upserts whose parent has not arrived yet; a parent can come in a later delta */
+const MAX_HELD_ORPHANS = 20_000;
 
 interface Wire {
   i: number;
@@ -137,6 +140,8 @@ class Plan {
   /** provisional id -> the file that asked for it (to report a failed create) */
   origin = new Map<number, string>();
   touched = new Set<string>();
+  /** new directories that stand for an instance that already exists */
+  adopted = new Set<string>();
 
   set(id: number, fields: Rec | NodeDiff) {
     const cur = this.sets.get(id) ?? ({ op: "set", id } as Op);
@@ -181,6 +186,8 @@ export class MirrorSession {
   private q: Promise<unknown> = Promise.resolve();
   private dumping = false;
   private buffered: any[] = [];
+  private held = new Map<number, Wire>();
+  private heldOverflowLogged = false;
   private tmpId = -1;
   private stopped = false;
   private applied = 0;
@@ -223,13 +230,13 @@ export class MirrorSession {
     } catch {}
   }
 
-  /** Studio reconnected: it is the source of truth again. */
-  resync() {
+  /** Studio is the source of truth again: after a reconnect, or an edit it did not take. */
+  resync(why = "after reconnect") {
     return this.enqueue(async () => {
       if (this.stopped) return;
       await this.dumpAll();
       await this.render();
-      this.note("resynced from Studio after reconnect");
+      this.note(`resynced from Studio ${why}`);
     });
   }
 
@@ -240,6 +247,7 @@ export class MirrorSession {
       place: this.placeName,
       services: this.roots.map((s) => s.name),
       instances: this.nodes.size,
+      heldOrphans: this.held.size,
       files: this.diskFiles.size,
       deleteThreshold: this.threshold,
       batchesApplied: this.applied,
@@ -332,16 +340,22 @@ export class MirrorSession {
 
   private async dumpAll() {
     this.dumping = true;
+    // a dump that dies halfway must not leave a partial shadow for the next render to act on
+    const saved = { nodes: this.nodes, roots: this.roots, others: this.others, held: this.held };
     try {
       const start = await this.send("mirror", { action: "start", services: this.services }, 30_000);
-      this.nodes.clear();
+      this.nodes = new Map();
       this.roots = [];
+      this.held = new Map();
       this.others = Array.isArray(start?.others) ? start.others.filter((x: unknown) => typeof x === "string") : [];
       for (;;) {
         const r = await this.send("mirror", { action: "next" }, DUMP_TIMEOUT);
         for (const w of r?.nodes ?? []) this.ingest(w);
         if (r?.done !== false) break;
       }
+    } catch (e) {
+      Object.assign(this, saved);
+      throw e;
     } finally {
       this.dumping = false;
     }
@@ -434,21 +448,49 @@ export class MirrorSession {
 
   private applyDelta(ev: { upserts?: Wire[]; removed?: number[] }) {
     for (const id of ev.removed ?? []) {
+      this.forgetHeld(id);
       const n = this.nodes.get(id);
       if (n && n.parent) this.dropSubtree(n);
     }
-    const orphans: Wire[] = [];
     for (const w of ev.upserts ?? []) {
-      if (w && w.p !== 0 && !this.nodes.has(w.p)) orphans.push(w);
-      else this.ingest(w);
-    }
-    // a parent can arrive after its child within one delta
-    for (let pass = 0; pass < 3 && orphans.length; pass++) {
-      for (const w of orphans.splice(0)) {
-        if (this.nodes.has(w.p)) this.ingest(w);
-        else orphans.push(w);
+      if (w && typeof w.i === "number" && typeof w.p === "number" && w.p !== 0 && !this.nodes.has(w.p)) {
+        this.hold(w);
+      } else {
+        if (w) this.held.delete(w.i);
+        this.ingest(w);
       }
     }
+    this.adoptHeld();
+  }
+
+  /** Keeps an upsert until its parent exists; the plugin may split one batch over several deltas. */
+  private hold(w: Wire) {
+    this.held.delete(w.i);
+    this.held.set(w.i, w);
+    if (this.held.size <= MAX_HELD_ORPHANS) return;
+    this.held.delete(this.held.keys().next().value!);
+    if (!this.heldOverflowLogged) {
+      this.heldOverflowLogged = true;
+      this.logError(`more than ${MAX_HELD_ORPHANS} instances are waiting for a parent; the oldest are being dropped`);
+    }
+  }
+
+  private adoptHeld() {
+    for (let progress = this.held.size > 0; progress; ) {
+      progress = false;
+      for (const [id, w] of this.held) {
+        if (!this.nodes.has(w.p)) continue;
+        this.held.delete(id);
+        this.ingest(w);
+        progress = true;
+      }
+    }
+  }
+
+  private forgetHeld(id: number) {
+    if (this.held.size === 0) return;
+    this.held.delete(id);
+    for (const [child, w] of this.held) if (w.p === id) this.forgetHeld(child);
   }
 
   private scheduleRender() {
@@ -668,6 +710,15 @@ export class MirrorSession {
     }
     for (const d of removedDirs) for (const f of this.diskFiles.keys()) if (isUnder(f, d)) removedFiles.add(f);
 
+    // a file in a directory an earlier render left alone, because it held nothing yet
+    for (const rel of added.keys()) {
+      const d = dirOf(rel);
+      if (!d || addedDirs.has(d) || this.layout.dirs.has(d)) continue;
+      const e = this.dirEntry(d);
+      const parent = e && this.parentFor(d, e.owner);
+      if (e && parent && this.existingFor(d, e, parent)) addedDirs.add(d);
+    }
+
     // a new folder whose files are still being written: wait for them, so the render of the
     // new instance cannot overwrite a model.json / gui.json the agent is about to finish
     if (this.deferrals < MAX_DEFERRALS) {
@@ -786,7 +837,11 @@ export class MirrorSession {
     for (const [rel, f] of modified) this.applyModified(rel, f, docs.get(rel), plan);
     // what the agent wrote is on disk now; a render that names it differently replaces it
     for (const list of [added, modified]) for (const [rel, f] of list) this.diskFiles.set(rel, f.hash);
-    for (const rel of addedDirs) if (this.layout.dirs.has(rel)) this.diskDirs.add(rel);
+    for (const rel of addedDirs) {
+      // an adopted directory with nothing in it is not part of the layout yet: the render must leave it for the agent
+      const emptyAdoption = plan.adopted.has(rel) && ![...this.diskFiles.keys()].some((f) => isUnder(f, rel));
+      if (this.layout.dirs.has(rel) && !emptyAdoption) this.diskDirs.add(rel);
+    }
 
     if (plan.empty) {
       await this.render();
@@ -796,9 +851,11 @@ export class MirrorSession {
     try {
       res = await this.send("mirror_apply", { ops: plan.ops }, 120_000);
     } catch (e: any) {
-      this.logError(`could not apply to Studio (${e.message}); the files will be reconciled on reconnect`);
+      this.logError(`could not apply to Studio (${e.message}); reloading the place so the files match it`);
       for (const n of plan.creates) this.dropProvisional(n.t as number);
       await this.render();
+      // queued, not awaited: this batch holds the queue. If Studio is gone it logs, and a reconnect resyncs
+      void this.resync("after a failed apply");
       return;
     }
     for (const c of res?.created ?? []) this.adopt(c.t, c.node);
@@ -1064,8 +1121,28 @@ export class MirrorSession {
     if (!parent) return this.reject(rel, undefined, "its parent is not in the place (services are created by Studio)");
     const isGui = /\.gui$/.test(rel);
     if (isGui && guiClass && !GUI_CLASSES.has(guiClass)) return this.reject(rel, undefined, `gui.json class must be ScreenGui, SurfaceGui or BillboardGui, not ${guiClass}`);
+    const existing = this.existingFor(rel, e, parent);
+    if (existing) {
+      this.layout.dirs.set(rel, existing);
+      plan.adopted.add(rel);
+      return;
+    }
     const n = this.createNode(parent, isGui ? (guiClass ?? "ScreenGui") : e.cls, e.name, undefined, undefined, rel, plan);
     if (n) this.layout.dirs.set(rel, n);
+  }
+
+  /**
+   * The instance a new directory stands for, when it already exists but has been a single
+   * file so far: `Lamp.Part/` beside `Lamp.Part.json`, or `StarterPlayerScripts/` for a
+   * service child that is not creatable. A plain name never adopts a script or a container.
+   */
+  private existingFor(rel: string, e: { name: string; cls: string }, parent: MNode): MNode | null {
+    if (this.isModelDir(dirOf(rel))) return null;
+    const twin = this.layout.files.get(`${rel}.json`);
+    if (twin?.kind === "json" && this.nodes.get(twin.node.id) === twin.node) return twin.node;
+    const plain = e.cls === "Folder" && !baseOf(rel).endsWith(".Folder");
+    const same = parent.children.filter((c) => c.name === e.name && (plain ? !isScript(c.cls) && !isContainer(c.cls) && c.cls !== "Folder" : c.cls === e.cls));
+    return same.length === 1 ? same[0] : null;
   }
 
   private createFromFile(rel: string, f: { text: string; hash: string }, doc: DocNode | undefined, plan: Plan) {
@@ -1098,6 +1175,10 @@ export class MirrorSession {
 
   private applyDoc(node: MNode, doc: DocNode, inModel: boolean, rel: string, plan: Plan) {
     if (doc.csg) return this.reject(rel, undefined, `"${node.name}" already exists; "csg" only applies when an instance is created (remove the key, or use a new name)`);
+    if (node.cls === "MeshPart" && "MeshId" in doc.props && !sameValue(doc.props.MeshId, node.props.MeshId)) {
+      this.reject(rel, undefined, `MeshId of "${node.name}" is read-only once the MeshPart exists; make a new MeshPart with the other mesh instead`);
+      delete doc.props.MeshId;
+    }
     const d = diffNode(node, doc);
     if (d) plan.set(node.id, d);
     if (!doc.hasChildren) return;

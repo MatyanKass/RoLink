@@ -466,7 +466,7 @@ export function scanScript(script: CollectedScript): Flag[] {
     addAt("remote_dynamic_code", "high", "remote input reaches code that runs dynamic code (unwanted admin access pattern)", rule(/\bOnServer(?:Event|Invoke)\b/g));
   }
   if (dynamicCode && new RegExp(`\\bIsStudio\\s*\\(|\\bMaxPlayers\\b|${game}\\s*\\.\\s*(?:PlaceId|GameId|CreatorId)\\b|\\bPrivateServerId\\b`).test(code)) {
-    addAt("environment_gate", "high", "dynamic code gated on Studio, place or player-count checks (suspicious pattern)", [firstDynamic]);
+    addAt("environment_gate", "high", "dynamic code gated on Studio, place or player-count checks (needs review)", [firstDynamic]);
   }
   const userGate = rule(/\.\s*UserId\s*[=~]=\s*\d{2,}|\b\d{2,}\s*[=~]=\s*[\w.]*UserId\b/g);
   userGate.push(...rule(new RegExp(`\\b(?:player|plr|p|user|speaker|sender)\\s*\\.\\s*Name\\s*==\\s*${MASK}`, "g"), masked));

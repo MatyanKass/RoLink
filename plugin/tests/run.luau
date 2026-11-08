@@ -441,6 +441,7 @@ local luauLib = require("@lune/luau")
 local fsLib = require("@lune/fs")
 luauLib.load(fsLib.readFile("playtest.luau"), { debugName = "playtest" })(H)
 luauLib.load(fsLib.readFile("editor.luau"), { debugName = "editor" })(H)
+luauLib.load(fsLib.readFile("audit.luau"), { debugName = "audit" })(H)
 
 
 -------------------------------------------------------------------------------

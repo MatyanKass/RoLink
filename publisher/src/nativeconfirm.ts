@@ -201,7 +201,8 @@ function planDialog(platform: string, r: Shown, env: NodeJS.ProcessEnv, exists: 
     const file = path.win32.join(env.SystemRoot ?? env.windir ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     return {
       file,
-      args: ["-NoProfile", "-NonInteractive", "-STA", "-Command", WINDOWS_SCRIPT],
+      // hides only PowerShell's console; see windowsHide below for why the process itself stays visible
+      args: ["-NoProfile", "-NonInteractive", "-STA", "-WindowStyle", "Hidden", "-Command", WINDOWS_SCRIPT],
       cwd: path.win32.dirname(file),
       stdin: Buffer.from(JSON.stringify(r), "utf8").toString("base64"),
       decide: byToken,
@@ -253,7 +254,7 @@ function run(plan: Plan, timeoutMs: number, killGraceMs: number, spawn: NonNulla
 
     let child: ChildLike;
     try {
-      child = spawn(plan.file, plan.args, { cwd: plan.cwd, env: safeEnv(env), shell: false, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
+      child = spawn(plan.file, plan.args, { cwd: plan.cwd, env: safeEnv(env), shell: false, windowsHide: false, stdio: ["pipe", "pipe", "ignore"] });
     } catch (e) {
       failed(e);
       return;

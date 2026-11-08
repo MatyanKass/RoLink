@@ -102,11 +102,12 @@ local function load(name, overrides)
 		modEnv[k] = v
 	end
 	modEnv.script = scriptObj
+	local requireOverride = overrides and overrides.require
 	modEnv.require = function(target)
 		if type(target) == "table" and target.__module then
 			return load(target.__module)
 		end
-		return require(target)
+		return (requireOverride or require)(target)
 	end
 	local fn = luau.load(src, { debugName = name, environment = modEnv })
 	local result = fn()

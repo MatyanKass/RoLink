@@ -13,12 +13,28 @@ local Paths = require(script.Parent.Paths)
 
 local Serialize = {}
 
--- Properties the node format carries in dedicated fields.
-local HANDLED = {
+-- Properties the node format carries in dedicated fields, by the kind of instance
+-- that has the field. The same names on other classes (a Frame's Size, a light's
+-- Color, a SpecialMesh's MeshId) are ordinary properties.
+local PART_FIELDS = {
 	CFrame = true, Size = true, Color = true, BrickColor = true, Material = true,
-	WorldPivot = true, PrimaryPart = true, Source = true, MeshId = true,
 	Position = true, Orientation = true, Rotation = true,
 }
+local ATTACHMENT_FIELDS = { CFrame = true, Position = true, Orientation = true, Rotation = true }
+local MODEL_FIELDS = { WorldPivot = true, PrimaryPart = true }
+
+local function carried(inst, prop)
+	if prop == "Source" then
+		return inst:IsA("LuaSourceContainer")
+	end
+	if inst:IsA("BasePart") then
+		return PART_FIELDS[prop] == true or (prop == "MeshId" and inst:IsA("MeshPart"))
+	end
+	if inst:IsA("Attachment") then
+		return ATTACHMENT_FIELDS[prop] == true
+	end
+	return inst:IsA("Model") and MODEL_FIELDS[prop] == true
+end
 
 -- Defaults the builder applies to every new BasePart; serialization treats them
 -- as "default" so they are not repeated on every node.
@@ -183,7 +199,7 @@ function Serialize.node(root, opts)
 			local props = {}
 			local any = false
 			for prop, t in Api.props(cls) do
-				if not HANDLED[prop] and not (inst:IsA("Attachment") and (prop == "CFrame" or prop == "Position" or prop == "Orientation")) then
+				if not carried(inst, prop) then
 					local ok, v = pcall(function()
 						return inst[prop]
 					end)

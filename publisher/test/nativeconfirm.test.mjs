@@ -153,7 +153,8 @@ test("Windows: fixed absolute powershell.exe, no shell, secrets kept out of its 
   const c = calls[0];
   assert.equal(c.file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   assert.ok(!c.options.shell);
-  assert.equal(c.options.windowsHide, true);
+  // windowsHide also hides the form: the process starts with SW_HIDE and the form's first show uses it
+  assert.equal(c.options.windowsHide, false);
   assert.equal(c.options.env.SystemRoot, "C:\\Windows");
   for (const k of ["ROBLOX_PUBLISH_API_KEY", "ACRCLOUD_ACCESS_SECRET", "AUDD_API_TOKEN"]) assert.equal(c.options.env[k], undefined, k);
 });
@@ -161,7 +162,7 @@ test("Windows: fixed absolute powershell.exe, no shell, secrets kept out of its 
 test("Windows: hostile text cannot alter the spawned script or its command line", async () => {
   const { confirm, calls } = win(exits("RL-NO", 1));
   await confirm({ title: HOSTILE, text: HOSTILE, confirmLabel: HOSTILE, timeoutMs: 5000 });
-  assert.deepEqual(calls[0].args, ["-NoProfile", "-NonInteractive", "-STA", "-Command", WINDOWS_SCRIPT]);
+  assert.deepEqual(calls[0].args, ["-NoProfile", "-NonInteractive", "-STA", "-WindowStyle", "Hidden", "-Command", WINDOWS_SCRIPT]);
   assert.match(calls[0].stdin, /^[A-Za-z0-9+/=]+$/, "stdin is plain base64");
 });
 

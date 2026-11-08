@@ -12,6 +12,14 @@ import { CACHE_DIR, log } from "./config.js";
 const DUMP_URL = "https://raw.githubusercontent.com/MaximumADHD/Roblox-Client-Tracker/roblox/API-Dump.json";
 const DUMP_FILE = path.join(CACHE_DIR, "API-Dump.json");
 const MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+const FETCH_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1000;
+
+export interface ReadDumpOptions {
+  file?: string;
+  fetchFn?: (url: string) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+  retryDelayMs?: number;
+}
 
 /** prop name → type string. Types: "bool" "number" "string" "ref" "Enum:<Name>" or a datatype name. */
 export interface CompactClass {
@@ -57,26 +65,40 @@ async function load(): Promise<CompactApi> {
   return compact(raw);
 }
 
-async function readDump(): Promise<any> {
+export async function readDump(opts: ReadDumpOptions = {}): Promise<any> {
+  const file = opts.file ?? DUMP_FILE;
+  const fetchFn = opts.fetchFn ?? fetch;
+  const delay = opts.retryDelayMs ?? RETRY_DELAY_MS;
   let stale = true;
   try {
-    const st = await fs.stat(DUMP_FILE);
+    const st = await fs.stat(file);
     stale = Date.now() - st.mtimeMs > MAX_AGE_MS;
   } catch {}
-  if (stale) {
+  let failure: unknown;
+  for (let attempt = 1; stale && attempt <= FETCH_ATTEMPTS; attempt++) {
     try {
       log("downloading Roblox API dump…");
-      const r = await fetch(DUMP_URL);
+      const r = await fetchFn(DUMP_URL);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const text = await r.text();
       JSON.parse(text); // validate before caching
-      await fs.mkdir(CACHE_DIR, { recursive: true });
-      await fs.writeFile(DUMP_FILE, text);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, text);
+      failure = undefined;
+      break;
     } catch (e) {
-      log("API dump download failed, using cache if present:", String(e));
+      failure = e;
+      log(`API dump download failed (attempt ${attempt}/${FETCH_ATTEMPTS}):`, String(e));
+      if (attempt < FETCH_ATTEMPTS) await new Promise((r) => setTimeout(r, delay * attempt));
     }
   }
-  return JSON.parse(await fs.readFile(DUMP_FILE, "utf8"));
+  let text: string;
+  try {
+    text = await fs.readFile(file, "utf8");
+  } catch {
+    throw new Error(`the Roblox API dump is unavailable: nothing cached at ${file} and the download failed (${String(failure)})`);
+  }
+  return JSON.parse(text);
 }
 
 function typeOf(vt: { Category: string; Name: string }): string | null {

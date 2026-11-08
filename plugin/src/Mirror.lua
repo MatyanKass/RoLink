@@ -20,25 +20,31 @@ local DELTA_NODES = 300
 
 -- derived or carried elsewhere; never serialized
 local SKIP = {
-	Position = true, Orientation = true, Rotation = true, BrickColor = true, Source = true,
+	BrickColor = true, Source = true,
 	WorldPivot = true, WorldCFrame = true, WorldPosition = true, WorldOrientation = true, WorldAxis = true,
 	WorldSecondaryAxis = true, LinkedSource = true, Pivot = true,
 }
 
+-- derived from CFrame on these classes only; a GUI's Position or an emitter's Rotation is real data
+local PLACEMENT = { Position = true, Orientation = true, Rotation = true }
+
 local sendEvent
 local pluginRef
+local loadApi
 local active = false
 local services = {} -- [service] = true
 local walkStack = {}
 local serviceConns = {}
+local watchedTags = {}
 local instConns = setmetatable({}, { __mode = "k" }) -- inst -> { connections }
 local dirty = {} -- [inst] = true
 local gone = {} -- [inst] = id
 local flushScheduled = false
 
-function Mirror.init(eventSender, plugin)
+function Mirror.init(eventSender, plugin, apiLoader)
 	sendEvent = eventSender
 	pluginRef = plugin
+	loadApi = apiLoader
 end
 
 local function excluded(inst)
@@ -101,8 +107,9 @@ end
 local function encodeProps(inst)
 	local props = {}
 	local cls = inst.ClassName
+	local derivedPlacement = inst:IsA("BasePart") or inst:IsA("Attachment")
 	for prop, t in Api.props(cls) do
-		if not SKIP[prop] then
+		if not SKIP[prop] and not (derivedPlacement and PLACEMENT[prop]) then
 			local ok, v = pcall(function()
 				return inst[prop]
 			end)
@@ -119,6 +126,15 @@ local function encodeProps(inst)
 	end
 	if inst:IsA("Model") then
 		props.Pivot = Codec.encode(inst:GetPivot())
+	end
+	if inst:IsA("MeshPart") then
+		-- not script-writable, so not in the API table; shown read-only in the files
+		local ok, id = pcall(function()
+			return inst.MeshId
+		end)
+		if ok and id ~= "" then
+			props.MeshId = id
+		end
 	end
 	return props
 end
@@ -191,7 +207,27 @@ local function flush()
 			batch[inst] = true
 		end
 	end
+	-- parents first: a large batch is cut into several deltas, and a child needs its parent to exist
+	local ordered = {}
 	for inst in batch do
+		if inst.Parent and mirrored(inst) then
+			local depth, cur = 0, inst
+			while cur and cur ~= game do
+				depth += 1
+				cur = cur.Parent
+			end
+			table.insert(ordered, { inst = inst, depth = depth })
+		end
+		if os.clock() - t0 > FRAME_BUDGET then
+			task.wait()
+			t0 = os.clock()
+		end
+	end
+	table.sort(ordered, function(a, b)
+		return a.depth < b.depth
+	end)
+	for _, entry in ordered do
+		local inst = entry.inst
 		if inst.Parent and mirrored(inst) then
 			local ok, node = pcall(encodeNode, inst)
 			if ok then
@@ -218,6 +254,22 @@ local function markDirty(inst)
 		flushScheduled = true
 		task.delay(FLUSH_DELAY, flush)
 	end
+end
+
+-- Connections per tag rather than per instance, so the cost does not grow with the place.
+local function onTagChanged(inst)
+	if active and mirrored(inst) then
+		markDirty(inst)
+	end
+end
+
+local function watchTag(tag)
+	if watchedTags[tag] then
+		return
+	end
+	watchedTags[tag] = true
+	table.insert(serviceConns, CollectionService:GetInstanceAddedSignal(tag):Connect(onTagChanged))
+	table.insert(serviceConns, CollectionService:GetInstanceRemovedSignal(tag):Connect(onTagChanged))
 end
 
 local function watchInst(inst)
@@ -255,6 +307,7 @@ local function disconnectAll()
 		c:Disconnect()
 	end
 	serviceConns = {}
+	watchedTags = {}
 	for inst, conns in instConns do
 		for _, c in conns do
 			c:Disconnect()
@@ -265,6 +318,12 @@ local function disconnectAll()
 end
 
 local function start(args)
+	if not Api.loaded() and loadApi then
+		loadApi()
+	end
+	if not Api.loaded() then
+		error("the class table has not loaded from the RoLink server yet, so instances cannot be read; try again in a moment", 0)
+	end
 	disconnectAll()
 	active = true
 	services = {}
@@ -283,6 +342,10 @@ local function start(args)
 			table.insert(serviceConns, svc.DescendantRemoving:Connect(onRemoving))
 		end
 	end
+	for _, tag in CollectionService:GetAllTags() do
+		watchTag(tag)
+	end
+	table.insert(serviceConns, CollectionService.TagAdded:Connect(watchTag))
 	local others = {}
 	for _, c in game:GetChildren() do
 		local okName, n = pcall(function()
@@ -308,12 +371,9 @@ local function nextChunk()
 				table.insert(nodes, node)
 			end
 			watchInst(inst)
-			-- Terrain has no children worth walking; voxels are never read
-			if not inst:IsA("Terrain") then
-				local kids = inst:GetChildren()
-				for i = #kids, 1, -1 do
-					table.insert(walkStack, kids[i])
-				end
+			local kids = inst:GetChildren()
+			for i = #kids, 1, -1 do
+				table.insert(walkStack, kids[i])
 			end
 		end
 		if os.clock() - t0 > FRAME_BUDGET then
@@ -494,7 +554,7 @@ local function makeInstance(ctx, op, parent)
 		error(op.class .. ' needs a "csg" recipe; see AGENTS.md', 0)
 	end
 	if op.class == "MeshPart" and op.props and op.props.MeshId then
-		local mp = game:GetService("AssetService"):CreateMeshPartAsync(tostring(op.props.MeshId))
+		local mp = Build.meshPart(op.props.MeshId)
 		op.props = table.clone(op.props)
 		op.props.MeshId = nil
 		return mp, false

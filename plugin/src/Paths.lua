@@ -12,9 +12,27 @@ local Selection = game:GetService("Selection")
 
 local Paths = {}
 
-local idOf = setmetatable({}, { __mode = "k" })
-local byId = setmetatable({}, { __mode = "v" })
-local nextId = 0
+-- Strong references: Luau may collect the wrapper of an instance that is still
+-- alive, which would expire a "#42" from a weak table. Destroying clears an entry,
+-- and the oldest ids go first past the limit.
+local maxIds = 200000
+local idOf, byId, destroyConn = {}, {}, {}
+local nextId, oldest, count = 0, 1, 0
+
+local function forget(id)
+	local inst = byId[id]
+	if not inst then
+		return
+	end
+	byId[id] = nil
+	idOf[inst] = nil
+	count -= 1
+	local conn = destroyConn[id]
+	if conn then
+		destroyConn[id] = nil
+		conn:Disconnect()
+	end
+end
 
 function Paths.id(inst)
 	local id = idOf[inst]
@@ -23,8 +41,27 @@ function Paths.id(inst)
 		id = nextId
 		idOf[inst] = id
 		byId[id] = inst
+		count += 1
+		local ok, conn = pcall(function()
+			return inst.Destroying:Once(function()
+				-- deferred: Destroying fires before DescendantRemoving, whose handlers still need this id
+				task.defer(forget, id)
+			end)
+		end)
+		if ok then
+			destroyConn[id] = conn
+		end
+		while count > maxIds and oldest < nextId do
+			forget(oldest)
+			oldest += 1
+		end
 	end
 	return id
+end
+
+-- for the tests
+function Paths._setLimit(n)
+	maxIds = n
 end
 
 local function sameNameIndex(inst)

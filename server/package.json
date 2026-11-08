@@ -14,7 +14,7 @@
     "plugin:build": "node ../plugin/build.mjs",
     "plugin:install": "node ../plugin/build.mjs --install",
     "test:plugin": "node test/run-plugin-tests.mjs",
-    "test:unit": "node --test test/meshimport.test.mjs test/mirror.test.mjs test/mirror.session.test.mjs test/toolbox.test.mjs test/animation.test.mjs test/editor.test.mjs"
+    "test:unit": "node --test test/meshimport.test.mjs test/mirror.test.mjs test/mirror.session.test.mjs test/toolbox.test.mjs test/animation.test.mjs test/editor.test.mjs test/regressions.test.mjs"
   },
   "engines": {
     "node": ">=20"

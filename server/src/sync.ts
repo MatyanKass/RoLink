@@ -393,6 +393,7 @@ export class SyncSession {
       if (t && Date.now() - t < 1500) return;
       this.schedule();
     });
+    this.watcher.on("error", (e) => this.note(`watcher: ${String(e)}`));
     await new Promise<void>((resolve) => {
       this.watcher!.once("ready", () => resolve());
       setTimeout(resolve, 5000);
