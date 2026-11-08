@@ -18,7 +18,7 @@ test("place_save uploads with versionType Saved and asks nothing", async (t) => 
   assert.equal(up.placeId, "22");
   assert.equal(up.contentType, "application/octet-stream");
   assert.deepEqual(up.bytes, RBXL);
-  assert.equal(ctx.rl.ops("confirm_dialog").length, 0);
+  assert.equal(ctx.dialogs.length, 0);
 });
 
 test("place_save works with Studio closed", async (t) => {
@@ -46,56 +46,47 @@ test("place ids must be positive integers", async (t) => {
   await assert.rejects(ctx.app.publisher.placeSave({ universeId: 1, placeId: 2.5, file: file(ctx) }), /placeId/);
 });
 
-test("place_publish uploads Published only after the Studio dialog returns true", async (t) => {
+test("place_publish uploads Published only after the native dialog answers Yes", async (t) => {
   const ctx = await setup(t);
   const r = await ctx.app.publisher.placePublish(place(ctx));
   assert.equal(r.versionType, "Published");
   assert.equal(ctx.cloud.placeUploads[0].versionType, "Published");
-  const dlg = ctx.rl.ops("confirm_dialog");
-  assert.equal(dlg.length, 1);
-  assert.match(dlg[0].args.text, /public/i);
-  assert.match(dlg[0].args.text, /players/i);
-  assert.match(dlg[0].args.text, /22/);
-  assert.ok(dlg[0].args.confirmLabel);
-  assert.ok(dlg[0].args.timeout > 0);
+  assert.equal(ctx.dialogs.length, 1);
+  assert.match(ctx.dialogs[0].text, /public/i);
+  assert.match(ctx.dialogs[0].text, /players/i);
+  assert.match(ctx.dialogs[0].text, /22/);
+  assert.ok(ctx.dialogs[0].confirmLabel);
+  assert.ok(ctx.dialogs[0].timeoutMs > 0);
 });
 
 test("place_publish refuses when the dialog is declined or times out", async (t) => {
   const ctx = await setup(t);
-  ctx.rl.dialog = { confirmed: false, reason: "timeout" };
+  ctx.dialog = { confirmed: false, reason: "timed out" };
   await assert.rejects(ctx.app.publisher.placePublish(place(ctx)), /not confirmed|declined/i);
   assert.equal(ctx.cloud.placeUploads.length, 0);
 });
 
 test("place_publish treats anything but confirmed:true as a refusal", async (t) => {
   const ctx = await setup(t);
-  ctx.rl.dialog = { confirmed: "yes" };
+  ctx.dialog = { confirmed: "yes" };
   await assert.rejects(ctx.app.publisher.placePublish(place(ctx)), /not confirmed|declined/i);
   assert.equal(ctx.cloud.placeUploads.length, 0);
 });
 
-test("place_publish refuses when Studio is not connected", async (t) => {
+test("place_publish does not need Studio: the dialog belongs to this process", async (t) => {
   const ctx = await setup(t, { rolink: { online: false } });
-  await assert.rejects(ctx.app.publisher.placePublish(place(ctx)), /Studio/);
-  assert.equal(ctx.cloud.placeUploads.length, 0);
-});
-
-test("place_publish does not accept a play-test session as Studio being connected", async (t) => {
-  const ctx = await setup(t);
-  ctx.rl.sessions = [{ context: "server", placeName: "Game", placeId: 22, gameId: 11, pluginVersion: "t", connectedAt: 1, lastSeen: 2 }];
-  await assert.rejects(ctx.app.publisher.placePublish(place(ctx)), /Studio/);
-  assert.equal(ctx.rl.ops("confirm_dialog").length, 0);
-  assert.equal(ctx.cloud.placeUploads.length, 0);
-});
-
-test("place_publish asks the Studio that has this place open when there is one", async (t) => {
-  const ctx = await setup(t);
-  ctx.rl.sessions = [
-    { context: "edit", placeName: "Other", placeId: 99, gameId: 1, pluginVersion: "t", connectedAt: 9, lastSeen: 9 },
-    { context: "edit", placeName: "Mine", placeId: 22, gameId: 11, pluginVersion: "t", connectedAt: 1, lastSeen: 9 },
-  ];
   await ctx.app.publisher.placePublish(place(ctx));
-  assert.equal(ctx.rl.ops("confirm_dialog")[0].args.place, "22");
+  assert.equal(ctx.cloud.placeUploads.length, 1);
+  assert.equal(ctx.dialogs.length, 1);
+});
+
+test("a fake plugin session has no say in place_publish", async (t) => {
+  const ctx = await setup(t);
+  ctx.rl.sessions = [{ context: "edit", placeName: "Fake", placeId: 22, gameId: 11, pluginVersion: "t", connectedAt: 9, lastSeen: 9 }];
+  ctx.dialog = { confirmed: false };
+  await assert.rejects(ctx.app.publisher.placePublish(place(ctx)), /not confirmed/i);
+  assert.equal(ctx.rl.calls.length, 0);
+  assert.equal(ctx.cloud.placeUploads.length, 0);
 });
 
 test("place errors are explained: 409 and rate limit", async (t) => {

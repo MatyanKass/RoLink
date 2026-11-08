@@ -1,6 +1,6 @@
 # rolink-publish
 
-A separate MCP server that publishes sounds, images and places to Roblox from your own account through Open Cloud. It connects to a running RoLink server over `/rpc` to create placeholders and show confirmation dialogs.
+A separate MCP server that publishes sounds, images and places to Roblox from your own account through Open Cloud. It connects to a running RoLink server over `/rpc` to create placeholders. Confirmations for live changes are native windows opened by this process.
 
 Your API key stays in this process. It is sent only to `apis.roblox.com` in the `x-api-key` header, is scrubbed from logs and results, and is never passed to RoLink or the Studio plugin.
 
@@ -85,12 +85,12 @@ Be careful which experiences you select for **assets** Write as well. Roblox's c
 | `publish_status {prepareId?}` | Lists the queue: moderation state, placeholder state, experience access, rejection reason. |
 | `asset_quota {userId?, assetType?, quotaType?}` | Reads usage, capacity and remaining count from Roblox. Roblox documents this per user. |
 | `place_save {universeId, placeId, file}` | Uploads a new Saved version. Players do not get it. No confirmation. |
-| `place_publish {universeId, placeId, file}` | Uploads and publishes after a confirmation dialog in Studio. |
-| `server_restart {universeId}` | Restarts servers on an older place version, after a confirmation dialog in Studio. |
+| `place_publish {universeId, placeId, file}` | Uploads and publishes after a Yes in the native dialog. |
+| `server_restart {universeId}` | Restarts servers on an older place version, after a Yes in the native dialog. |
 | `datastore_list {universeId, store?, scope?, prefix?, limit?, pageToken?}` | Lists data stores, or the keys in one. No confirmation. |
 | `datastore_get {universeId, store, key, scope?}` | Reads one entry. No confirmation. |
-| `datastore_set {universeId, store, key, value, scope?, users?, attributes?, create?}` | Writes one entry after a confirmation dialog in Studio showing the current and new value. |
-| `datastore_delete {universeId, store, key, scope?}` | Deletes one entry after a confirmation dialog in Studio. There is no bulk delete tool. |
+| `datastore_set {universeId, store, key, value, scope?, users?, attributes?, create?}` | Writes one entry after a Yes in the native dialog showing the current and new value. |
+| `datastore_delete {universeId, store, key, scope?}` | Deletes one entry after a Yes in the native dialog. There is no bulk delete tool. |
 
 There is deliberately **no tool that changes experience privacy or makes a game public**.
 
@@ -111,9 +111,21 @@ Open Cloud's v2 update has no partial update and clears fields left out of the r
 | Animation | `Я согласен на публикацию анимаций` or `I agree to publish animations` |
 | Sound matching a known track | `Я подтверждаю публикацию: <title>` or `I confirm publishing: <title>` |
 
-**The phrase is an agreement step, not a security boundary.** Tool descriptions tell the agent to show you the summary and wait for you to type it, but the server cannot tell who typed the text. It stops mistakes and makes the decision explicit; it does not stop an agent that ignores its instructions. Anything that can reach your key can publish.
+**The phrase is a soft agreement, not a security boundary.** Tool descriptions tell the agent to show you the summary and wait for you to type it, but the server cannot tell who typed the text: an agent could type the phrase itself. It stops mistakes and makes the decision explicit, nothing more.
 
-The same goes for the Studio dialog on `place_publish`, `server_restart`, `datastore_set` and `datastore_delete`: it is a real button press and cannot be answered through this server, but an agent with RoLink's `run` tool executes code inside Studio and could in principle script it. Treat it as protection against accidents.
+### The native dialog
+
+**The native dialog is the only real gate.** `place_publish`, `server_restart`, `datastore_set` and `datastore_delete` open a modal window on this computer and act only on an explicit Yes. No is the default button; closing the window, the 120-second timeout or any error all count as No. It does not need Studio, and it does not go through RoLink's `/rpc` or the plugin, so a fake plugin session or code running in Studio cannot answer it.
+
+| System | Dialog |
+| --- | --- |
+| Windows | Windows Forms window through `powershell.exe`, always on top |
+| macOS | `osascript` |
+| Linux | `zenity`, or `kdialog` if zenity is missing. With neither, these tools refuse with an error; they never proceed without asking. |
+
+Names and values from the game are untrusted, so they reach the dialog as data, never as part of a command, and control, bidirectional and zero-width characters are removed and lengths capped in what you see. Read the target in the window before clicking Yes. Only one dialog can be open at a time. `place_save` has no dialog: it does not reach players.
+
+**The remaining limit:** an agent with full shell access to your user account can still read the API key and call Roblox directly, or script a click on the window, because it runs as you. The dialog stops a confined agent, not your own account. The key's scopes are the last line: give it only the permissions and experiences you need.
 
 A failed upload still spends its `prepareId`, because the outcome of a failed request can be unclear. Call `prepare_asset` again to retry.
 
@@ -177,4 +189,4 @@ npm run typecheck
 npm test
 ```
 
-Tests use a fake Open Cloud and a real local HTTP stand-in for RoLink's `/rpc`; nothing talks to Roblox.
+Tests use a fake Open Cloud and a real local HTTP stand-in for RoLink's `/rpc`; nothing talks to Roblox, and no real dialog is opened.

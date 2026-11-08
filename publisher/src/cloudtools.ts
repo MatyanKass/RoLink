@@ -1,21 +1,21 @@
 // Tools that act on the experience rather than upload a file: quota, server
 // restart and data stores. Reads are free; anything that changes live state
-// waits for a button press in Studio.
+// waits for a Yes in a native dialog on this computer.
 
 import type { Log, PublishConfig, Redactor } from "./config.js";
 import { CloudError, type AssetQuota, type DataStoreEntry, type EntryAddress, type OpenCloud } from "./opencloud.js";
-import type { RoLinkClient } from "./rolink.js";
+import { DIALOG_TIMEOUT_MS, requireNativeYes, type NativeConfirm } from "./nativeconfirm.js";
 
-const DIALOG_SECONDS = 120;
 const PREVIEW_CHARS = 300;
+const NAME_CHARS = 120;
 const NAME_RE = /^\w+$/;
 
 export interface CloudToolsDeps {
   config: PublishConfig;
   cloud?: OpenCloud;
-  rolink: RoLinkClient;
   redactor: Redactor;
   log: Log;
+  confirm: NativeConfirm;
 }
 
 interface EntryArgs {
@@ -48,6 +48,12 @@ function preview(v: unknown): string {
   return s.length > PREVIEW_CHARS ? `${s.slice(0, PREVIEW_CHARS)}… (${s.length} characters in total)` : s;
 }
 
+/** A store, scope or key name for the dialog: long names must not push the rest out of it. */
+function shown(name: string): string {
+  const s = JSON.stringify(name);
+  return s.length > NAME_CHARS ? `${s.slice(0, NAME_CHARS)}… (${name.length} characters in total)` : s;
+}
+
 function userPath(u: string | number): string {
   if (typeof u === "number" && Number.isSafeInteger(u) && u > 0) return `users/${u}`;
   if (typeof u === "string" && /^users\/\d+$/.test(u)) return u;
@@ -67,19 +73,9 @@ export class CloudTools {
     return this.deps.cloud;
   }
 
-  /** True only for a real press of the confirm button in a connected Studio. */
-  private async confirm(universeId: number, title: string, body: string, confirmLabel: string, nothingDone: string) {
-    const sessions = await this.deps.rolink.editSessions();
-    if (sessions.length === 0) throw new Error("Refused: Roblox Studio is not connected through RoLink, so the confirmation dialog cannot be shown.");
-    const own = sessions.find((s) => s.gameId === universeId);
-    const place = own ? (own.placeId ? String(own.placeId) : own.placeName) : await this.deps.rolink.currentPlace();
-    let answer;
-    try {
-      answer = await this.deps.rolink.call("confirm_dialog", { title, text: body, confirmLabel, timeout: DIALOG_SECONDS, place }, (DIALOG_SECONDS + 30) * 1000);
-    } catch (e: any) {
-      throw new Error(`Refused: the Studio confirmation dialog could not be shown (${this.deps.redactor.text(String(e?.message ?? e))}).`);
-    }
-    if (answer?.confirmed !== true) throw new Error(`Not confirmed: the dialog in Studio was declined, closed or timed out${answer?.reason ? ` (${answer.reason})` : ""}. ${nothingDone}`);
+  /** Returns only after an explicit Yes in the native dialog. */
+  private confirm(title: string, body: string, confirmLabel: string, nothingDone: string) {
+    return requireNativeYes(this.deps.confirm, this.deps.redactor, { title, text: body, confirmLabel, timeoutMs: DIALOG_TIMEOUT_MS }, nothingDone);
   }
 
   async assetQuota(args: { userId?: number; assetType?: string; quotaType?: string }) {
@@ -103,7 +99,6 @@ export class CloudTools {
     const universeId = positive("universeId", args.universeId);
     const cloud = this.cloud();
     await this.confirm(
-      universeId,
       "Restart live servers?",
       [
         `Servers of experience ${universeId} that run an older version of a place will be restarted.`,
@@ -147,7 +142,7 @@ export class CloudTools {
   }
 
   private where(a: EntryAddress) {
-    return `Experience ${a.universeId}, data store ${JSON.stringify(a.store)}${a.scope ? `, scope ${JSON.stringify(a.scope)}` : ""}, key ${JSON.stringify(a.key)}.`;
+    return `Experience (universe) ${a.universeId}, data store ${shown(a.store)}${a.scope ? `, scope ${shown(a.scope)}` : ""}, key ${shown(a.key)}.`;
   }
 
   private notFound(a: EntryAddress) {
@@ -190,7 +185,6 @@ export class CloudTools {
     }
 
     await this.confirm(
-      a.universeId,
       "Change live player data?",
       [
         this.where(a),
@@ -216,7 +210,6 @@ export class CloudTools {
     if (!before) throw this.notFound(a);
 
     await this.confirm(
-      a.universeId,
       "Delete live player data?",
       [
         this.where(a),

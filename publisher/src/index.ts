@@ -105,7 +105,7 @@ const entry = {
 
 register(
   "server_restart",
-  "Restart the experience's live servers that run an older place version (Open Cloud restartServers). Shows a confirmation dialog in Studio and refuses if Studio is not connected or the user does not press the button. Players on those servers are disconnected.",
+  "Restart the experience's live servers that run an older place version (Open Cloud restartServers). Opens a native confirmation dialog on this computer and refuses unless the user clicks Yes. Players on those servers are disconnected.",
   universe,
   (a) => app.tools.serverRestart(a),
 );
@@ -135,7 +135,7 @@ register(
 
 register(
   "datastore_set",
-  `Write one data store entry. Shows a Studio confirmation dialog with the store, key, current and new value, and refuses if Studio is not connected or the user does not press the button.
+  `Write one data store entry. Opens a native confirmation dialog on this computer with the store, key, current and new value, and refuses unless the user clicks Yes.
 Roblox's v2 update has no partial update and clears fields left out of the request; this tool guards against that by reading the entry first and sending its users and attributes again unless you pass your own. Writing replaces the whole value. The key must already exist unless create is true.`,
   {
     ...entry,
@@ -149,7 +149,7 @@ Roblox's v2 update has no partial update and clears fields left out of the reque
 
 register(
   "datastore_delete",
-  "Delete one data store entry. Shows a Studio confirmation dialog with the store, key and current value, and refuses if Studio is not connected or the user does not press the button. Roblox soft-deletes it and purges it after 30 days. One key at a time; there is no bulk delete.",
+  "Delete one data store entry. Opens a native confirmation dialog on this computer with the store, key and current value, and refuses unless the user clicks Yes. Roblox soft-deletes it and purges it after 30 days. One key at a time; there is no bulk delete.",
   entry,
   (a) => app.tools.datastoreDelete(a),
 );
@@ -171,7 +171,7 @@ register(
 
 register(
   "place_publish",
-  "Upload a place file and publish it (versionType=Published). Shows a confirmation dialog in Studio and refuses if Studio is not connected or the user does not press the button. If the experience is already public, players get the new version at once.",
+  "Upload a place file and publish it (versionType=Published). Opens a native confirmation dialog on this computer and refuses unless the user clicks Yes. If the experience is already public, players get the new version at once.",
   place,
   (a) => app.publisher.placePublish(a),
 );

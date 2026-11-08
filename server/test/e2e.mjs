@@ -177,11 +177,11 @@ const health = await (await fetch(`${BASE}/health`)).json();
 ok(health.rolink && health.sessions.length === 1 && !("id" in health.sessions[0]), "health has no session ids");
 ok(!JSON.stringify(health).includes(session), "session id not in health");
 
-// confirm_dialog is for rolink-publish over /rpc only: not an agent-callable MCP tool
+// the human gate lives in rolink-publish's own process: no such tool or op here any more
 const rpcToken = fs.readFileSync(path.join(os.tmpdir(), `rolink-${PORT}.token`), "utf8").trim();
-const dlg = await (await fetch(`${BASE}/rpc`, { method: "POST", headers: { "content-type": "application/json", "x-rolink-token": rpcToken }, body: JSON.stringify({ tool: "confirm_dialog", args: { title: "T", text: "B", confirmLabel: "Go", timeout: 7 } }) })).json();
-ok(dlg.ok && received.at(-1).op === "confirm_dialog", "confirm_dialog forwarded to the plugin: " + JSON.stringify(dlg));
-ok(received.at(-1).args.timeout === 7 && received.at(-1).args.confirmLabel === "Go" && received.at(-1).args.text === "B", "confirm_dialog args forwarded");
+const opsBefore = received.length;
+const dlg = await (await fetch(`${BASE}/rpc`, { method: "POST", headers: { "content-type": "application/json", "x-rolink-token": rpcToken }, body: JSON.stringify({ tool: "confirm_dialog", args: { title: "T", text: "B" } }) })).json();
+ok(!dlg.ok && /unknown tool/.test(dlg.error) && received.length === opsBefore, "confirm_dialog is gone from /rpc and never reaches the plugin: " + JSON.stringify(dlg));
 ok(!(await c1.listTools()).tools.some((t) => t.name === "confirm_dialog"), "confirm_dialog is not an MCP tool");
 
 // malformed chunked results reject the call instead of hanging / crashing

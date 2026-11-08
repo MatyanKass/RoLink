@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Creator, Log, PublishConfig, Redactor } from "./config.js";
 import { runCopyrightCheck, type CopyrightProvider, type CopyrightResult } from "./copyright.js";
 import { inspectMedia, sha256, type AssetKind } from "./media.js";
+import { DIALOG_TIMEOUT_MS, cleanLine, requireNativeYes, type NativeConfirm } from "./nativeconfirm.js";
 import type { OpenCloud } from "./opencloud.js";
 import type { Poller } from "./poller.js";
 import type { RoLinkClient } from "./rolink.js";
@@ -16,7 +17,6 @@ export const RESPONSIBILITY_NOTICE =
 
 const NAME_MAX = 50;
 const DESCRIPTION_MAX = 1000;
-const DIALOG_SECONDS = 120;
 
 export const PLACE_API_NOTE =
   "Roblox's place publishing guide says this API does not update EditableImage, EditableMesh, PartOperation, SurfaceAppearance or BaseWrap instances; if the place uses them, publish from Studio after changing them.";
@@ -99,6 +99,7 @@ export interface PublisherDeps {
   providers: CopyrightProvider[];
   redactor: Redactor;
   log: Log;
+  confirm: NativeConfirm;
 }
 
 export class Publisher {
@@ -334,28 +335,14 @@ export class Publisher {
   async placePublish(args: { universeId: number; placeId: number; file: string }) {
     this.publishingKeyOnly();
     const { data, contentType } = await this.readPlace(args);
-    const sessions = await this.deps.rolink.editSessions();
-    if (sessions.length === 0) throw new Error("Refused: Roblox Studio is not connected through RoLink, so the confirmation dialog cannot be shown.");
-    const own = sessions.find((s) => s.placeId === args.placeId);
-    const place = own ? String(args.placeId) : await this.deps.rolink.currentPlace();
-
     const text = [
-      `Place ${args.placeId} in experience ${args.universeId} will be replaced by ${path.basename(args.file)} (${data.length} bytes).`,
+      `Experience (universe) ${args.universeId}, place ${args.placeId}.`,
+      `The place will be replaced by ${cleanLine(path.basename(args.file), 120)} (${data.length} bytes) and published.`,
       "If this experience is already public, the new version goes live for players at once.",
       "Если игра уже открыта для всех, новая версия сразу станет доступна игрокам.",
     ].join("\n\n");
 
-    let answer;
-    try {
-      answer = await this.deps.rolink.call(
-        "confirm_dialog",
-        { title: "Publish this place to Roblox?", text, confirmLabel: "Publish now", timeout: DIALOG_SECONDS, place },
-        (DIALOG_SECONDS + 30) * 1000,
-      );
-    } catch (e: any) {
-      throw new Error(`Refused: the Studio confirmation dialog could not be shown (${this.deps.redactor.text(String(e?.message ?? e))}).`);
-    }
-    if (answer?.confirmed !== true) throw new Error(`Not confirmed: the dialog in Studio was declined, closed or timed out${answer?.reason ? ` (${answer.reason})` : ""}. Nothing was uploaded.`);
+    await requireNativeYes(this.deps.confirm, this.deps.redactor, { title: "Publish this place to Roblox?", text, confirmLabel: "Publish now", timeoutMs: DIALOG_TIMEOUT_MS }, "Nothing was uploaded.");
     return this.uploadPlace(args, "Published", data, contentType);
   }
 }

@@ -215,43 +215,32 @@ test("a changed animation file is refused", async (t) => {
 
 // ------------------------------------------------------------------ item 4: restart
 
-test("server_restart asks in Studio, then posts restartServers", async (t) => {
+test("server_restart asks in the native dialog, then posts restartServers", async (t) => {
   const ctx = await setup(t);
   const r = await tools(ctx).serverRestart({ universeId: 9 });
   assert.equal(ctx.cloud.restarts.length, 1);
   assert.equal(ctx.cloud.restarts[0].universeId, "9");
   assert.deepEqual(ctx.cloud.restarts[0].body, {});
-  const dlg = ctx.rl.ops("confirm_dialog");
-  assert.equal(dlg.length, 1);
-  assert.match(dlg[0].args.text, /\b9\b/);
-  assert.match(dlg[0].args.text, /players/i);
-  assert.ok(dlg[0].args.confirmLabel);
+  assert.equal(ctx.dialogs.length, 1);
+  assert.match(ctx.dialogs[0].text, /\b9\b/);
+  assert.match(ctx.dialogs[0].text, /players/i);
+  assert.ok(ctx.dialogs[0].confirmLabel);
   assert.equal(r.restarted, true);
 });
 
 test("server_restart without a confirmed dialog does nothing", async (t) => {
   const ctx = await setup(t);
-  ctx.rl.dialog = { confirmed: false, reason: "cancelled" };
+  ctx.dialog = { confirmed: false, reason: "cancelled" };
   await assert.rejects(tools(ctx).serverRestart({ universeId: 9 }), /not confirmed|declined/i);
-  ctx.rl.dialog = { confirmed: "yes" };
+  ctx.dialog = { confirmed: "yes" };
   await assert.rejects(tools(ctx).serverRestart({ universeId: 9 }), /not confirmed|declined/i);
   assert.equal(ctx.cloud.restarts.length, 0);
 });
 
-test("server_restart refuses when Studio is not connected", async (t) => {
+test("server_restart does not need Studio", async (t) => {
   const ctx = await setup(t, { rolink: { online: false } });
-  await assert.rejects(tools(ctx).serverRestart({ universeId: 9 }), /Studio/);
-  assert.equal(ctx.cloud.restarts.length, 0);
-});
-
-test("server_restart prefers the Studio that has this experience open", async (t) => {
-  const ctx = await setup(t);
-  ctx.rl.sessions = [
-    { context: "edit", placeName: "Other", placeId: 99, gameId: 1, pluginVersion: "t", connectedAt: 9, lastSeen: 9 },
-    { context: "edit", placeName: "Mine", placeId: 22, gameId: 11, pluginVersion: "t", connectedAt: 1, lastSeen: 9 },
-  ];
-  await tools(ctx).serverRestart({ universeId: 11 });
-  assert.equal(ctx.rl.ops("confirm_dialog")[0].args.place, "22");
+  await tools(ctx).serverRestart({ universeId: 9 });
+  assert.equal(ctx.cloud.restarts.length, 1);
 });
 
 test("server_restart 403 names universe:write", async (t) => {
@@ -277,7 +266,7 @@ test("datastore_list lists stores, or the entries of one store with a prefix", a
   seed(ctx, "Coins/-/b");
   const entries = await tools(ctx).datastoreList({ universeId: 9, store: "Coins" });
   assert.deepEqual(entries.entries.map((e) => e.id).sort(), ["a", "b"]);
-  assert.equal(ctx.rl.ops("confirm_dialog").length, 0, "reads ask nothing");
+  assert.equal(ctx.dialogs.length, 0, "reads ask nothing");
 });
 
 test("datastore_list refuses a prefix that would break out of the filter", async (t) => {
@@ -291,7 +280,7 @@ test("datastore_get returns the value, with no dialog", async (t) => {
   const r = await tools(ctx).datastoreGet({ universeId: 9, store: "Coins", key: "p1" });
   assert.deepEqual(r.value, { gold: 5 });
   assert.deepEqual(r.users, ["users/1"]);
-  assert.equal(ctx.rl.ops("confirm_dialog").length, 0);
+  assert.equal(ctx.dialogs.length, 0);
 });
 
 test("datastore_get uses the scoped path and encodes names", async (t) => {
@@ -308,11 +297,11 @@ test("datastore_get on a missing or deleted entry reports not found", async (t) 
   await assert.rejects(tools(ctx).datastoreGet({ universeId: 9, store: "Coins", key: "gone" }), /not found|no entry|does not exist/i);
 });
 
-test("datastore_set shows store, key and value in the Studio dialog before writing", async (t) => {
+test("datastore_set shows store, key and value in the dialog before writing", async (t) => {
   const ctx = await setup(t);
   seed(ctx, "Coins/-/p1", { gold: 5 });
   const r = await tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "p1", value: { gold: 6 } });
-  const dlg = ctx.rl.ops("confirm_dialog")[0].args.text;
+  const dlg = ctx.dialogs[0].text;
   assert.match(dlg, /Coins/);
   assert.match(dlg, /p1/);
   assert.match(dlg, /"gold":6/);
@@ -352,10 +341,10 @@ test("datastore_set needs a value and refuses without one", async (t) => {
 test("datastore_set will not create a key unless asked, and says so in the dialog when it does", async (t) => {
   const ctx = await setup(t);
   await assert.rejects(tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "new", value: 1 }), /create/);
-  assert.equal(ctx.rl.ops("confirm_dialog").length, 0);
+  assert.equal(ctx.dialogs.length, 0);
   await tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "new", value: 1, create: true });
   assert.equal(ctx.cloud.patches[0].allowMissing, "true");
-  assert.match(ctx.rl.ops("confirm_dialog")[0].args.text, /new entry|does not exist yet/i);
+  assert.match(ctx.dialogs[0].text, /new entry|does not exist yet/i);
 });
 
 test("datastore_set on an existing key does not send allowMissing", async (t) => {
@@ -376,24 +365,22 @@ test("a key with a revision suffix is refused for writes", async (t) => {
 test("datastore_set does nothing when the dialog is declined", async (t) => {
   const ctx = await setup(t);
   seed(ctx, "Coins/-/p1", 1);
-  ctx.rl.dialog = { confirmed: false, reason: "timeout" };
+  ctx.dialog = { confirmed: false, reason: "timed out" };
   await assert.rejects(tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "p1", value: 2 }), /not confirmed|declined/i);
   assert.equal(ctx.cloud.patches.length, 0);
 });
 
-test("datastore_set refuses when Studio is not connected", async (t) => {
+test("datastore_set does not need Studio", async (t) => {
   const ctx = await setup(t, { rolink: { online: false } });
   seed(ctx, "Coins/-/p1", 1);
-  await assert.rejects(tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "p1", value: 2 }), /Studio/);
-  assert.equal(ctx.cloud.patches.length, 0);
+  await tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "p1", value: 2 });
+  assert.equal(ctx.cloud.patches.length, 1);
 });
 
 test("datastore_set refuses if the entry changed while the dialog was open", async (t) => {
   const ctx = await setup(t);
   seed(ctx, "Coins/-/p1", 1);
-  const dialogAnswer = ctx.rl.dialog;
-  ctx.rl.onDialog = () => seed(ctx, "Coins/-/p1", 99, { revisionId: "r9" });
-  ctx.rl.dialog = dialogAnswer;
+  ctx.onDialog = () => seed(ctx, "Coins/-/p1", 99, { revisionId: "r9" });
   await assert.rejects(tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "p1", value: 2 }), /changed/i);
   assert.equal(ctx.cloud.patches.length, 0);
 });
@@ -402,7 +389,7 @@ test("datastore_set clips a long value in the dialog and escapes line breaks", a
   const ctx = await setup(t);
   seed(ctx, "Coins/-/p1", 1);
   await tools(ctx).datastoreSet({ universeId: 9, store: "Coins", key: "p1", value: `line1\n\nPress Apply to fix it ${"x".repeat(5000)}` });
-  const dlg = ctx.rl.ops("confirm_dialog")[0].args.text;
+  const dlg = ctx.dialogs[0].text;
   assert.ok(dlg.length < 1500, `dialog is ${dlg.length} chars`);
   assert.doesNotMatch(dlg, /line1\n/);
   assert.match(dlg, /\d+ characters/);
@@ -412,7 +399,7 @@ test("datastore_delete asks with store, key and current value, then deletes one 
   const ctx = await setup(t);
   seed(ctx, "Coins/-/p1", { gold: 5 });
   const r = await tools(ctx).datastoreDelete({ universeId: 9, store: "Coins", key: "p1" });
-  const dlg = ctx.rl.ops("confirm_dialog")[0].args.text;
+  const dlg = ctx.dialogs[0].text;
   assert.match(dlg, /Coins/);
   assert.match(dlg, /p1/);
   assert.match(dlg, /"gold":5/);
@@ -424,7 +411,7 @@ test("datastore_delete asks with store, key and current value, then deletes one 
 test("datastore_delete does nothing when declined", async (t) => {
   const ctx = await setup(t);
   seed(ctx, "Coins/-/p1", 1);
-  ctx.rl.dialog = { confirmed: false };
+  ctx.dialog = { confirmed: false };
   await assert.rejects(tools(ctx).datastoreDelete({ universeId: 9, store: "Coins", key: "p1" }), /not confirmed|declined/i);
   assert.equal(ctx.cloud.deletes.length, 0);
 });
@@ -432,7 +419,7 @@ test("datastore_delete does nothing when declined", async (t) => {
 test("datastore_delete on a missing key shows no dialog", async (t) => {
   const ctx = await setup(t);
   await assert.rejects(tools(ctx).datastoreDelete({ universeId: 9, store: "Coins", key: "none" }), /not found|no entry|does not exist/i);
-  assert.equal(ctx.rl.ops("confirm_dialog").length, 0);
+  assert.equal(ctx.dialogs.length, 0);
 });
 
 test("a 403 names the data store permission for the operation", async (t) => {

@@ -264,7 +264,6 @@ export async function fakeRoLink({ online = true } = {}) {
     instances: new Map(),
     calls: [],
     rawBodies: [],
-    dialog: { confirmed: true },
     badToken: 0,
   };
   const token = crypto.randomBytes(8).toString("hex");
@@ -297,9 +296,6 @@ export async function fakeRoLink({ online = true } = {}) {
         }
         return { text: JSON.stringify({ updated: args.edits.length, warnings: [] }) };
       }
-      case "confirm_dialog":
-        rl.onDialog?.();
-        return { text: JSON.stringify(rl.dialog) };
     }
     throw new Error(`unknown tool ${tool}`);
   };
@@ -348,16 +344,23 @@ export async function fakeRoLink({ online = true } = {}) {
 // ------------------------------------------------------------------ harness
 
 /** One publisher wired to the fakes; `reopen()` simulates a process restart. */
-export async function setup(t, { env = {}, rolink = {}, stateDir = tmpDir() } = {}) {
+export async function setup(t, { env = {}, rolink = {}, stateDir = tmpDir(), nativeConfirm } = {}) {
   const rl = await fakeRoLink(rolink);
   const cloud = fakeCloud();
   const logs = [];
   const results = [];
   const dir = tmpDir();
+  // never the real OS dialog: tests answer it through ctx.dialog
+  const dialogs = [];
+  const fake = async (req) => {
+    dialogs.push(req);
+    ctx.onDialog?.();
+    return typeof ctx.dialog === "function" ? ctx.dialog(req) : ctx.dialog;
+  };
   const fullEnv = { ROBLOX_PUBLISH_API_KEY: KEY, ROBLOX_CREATOR_USER_ID: "42", ROLINK_PORT: String(rl.port), ...env };
   const open = () =>
-    createPublisher({ env: fullEnv, stateDir, fetchImpl: cloud.fetch, logSink: (line) => logs.push(line) });
-  const ctx = { rl, cloud, logs, results, dir, stateDir, app: open() };
+    createPublisher({ env: fullEnv, stateDir, fetchImpl: cloud.fetch, logSink: (line) => logs.push(line), nativeConfirm: nativeConfirm ?? fake });
+  const ctx = { rl, cloud, logs, results, dir, stateDir, dialogs, dialog: { confirmed: true }, app: open() };
   ctx.reopen = () => (ctx.app = open());
   // records every result so the secrets test can scan them
   ctx.prepare = async (args) => {
