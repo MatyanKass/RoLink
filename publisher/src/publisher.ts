@@ -24,7 +24,16 @@ export const PLACE_API_NOTE =
 const AGREE: Record<AssetKind, string[]> = {
   audio: ["Я согласен на публикацию звуков", "I agree to publish sounds"],
   image: ["Я согласен на публикацию картинок", "I agree to publish images"],
+  animation: ["Я согласен на публикацию анимаций", "I agree to publish animations"],
 };
+
+const ASSET_TYPE: Record<AssetKind, string> = { audio: "Audio", image: "Decal", animation: "Animation" };
+
+export const ANIMATION_ROOT_NOTE =
+  "Roblox's docs list Animation as an uploadable .rbxm type but do not say what the file's root must be: a KeyframeSequence root is unconfirmed, and this route has not been exercised against the live API.";
+
+const NO_UNIVERSE_NOTE =
+  "Experience access: none, because no experience is known (pass universeId, set ROBLOX_UNIVERSE_ID, or publish the open place). The asset may not play in your game until you grant it access.";
 
 function phrasesFor(kind: AssetKind, copyright: CopyrightResult): string[] {
   if (copyright.status === "match") return [`Я подтверждаю публикацию: ${copyright.title}`, `I confirm publishing: ${copyright.title}`];
@@ -64,7 +73,7 @@ function normaliseTarget(kind: AssetKind, t: TargetArgs): Target {
 }
 
 function copyrightLines(kind: AssetKind, c: CopyrightResult): string[] {
-  if (kind === "image") return ["Copyright check: did not run (no automatic check exists for images)."];
+  if (kind !== "audio") return [`Copyright check: did not run (no automatic check exists for ${kind === "image" ? "images" : "animations"}).`];
   const scope = c.partial ? ` Only the first ${(c.checkedBytes! / 1e6).toFixed(1)} MB of the file was checked.` : "";
   switch (c.status) {
     case "not_run":
@@ -117,13 +126,28 @@ export class Publisher {
     return "not configured";
   }
 
-  async prepareAsset(args: { path: string; kind: AssetKind; name: string; description?: string; target?: TargetArgs }) {
+  /** Which experience gets Use access: the caller's, the configured one, else the open Studio's. */
+  private async resolveUniverse(explicit: number | undefined, target: Target | undefined): Promise<number | undefined> {
+    if (explicit !== undefined) {
+      if (!Number.isSafeInteger(explicit) || explicit <= 0) throw new Error("universeId must be a positive integer.");
+      return explicit;
+    }
+    if (this.deps.config.universeId) return this.deps.config.universeId;
+    const sessions = await this.deps.rolink.editSessions();
+    const wanted = target?.place?.toLowerCase();
+    const session = wanted ? sessions.find((s) => s.placeName.toLowerCase().includes(wanted) || String(s.placeId) === wanted) : sessions[0];
+    return session?.gameId || undefined;
+  }
+
+  async prepareAsset(args: { path: string; kind: AssetKind; name: string; description?: string; target?: TargetArgs; universeId?: number }) {
+    if (args.kind === "animation" && args.target) throw new Error("An animation cannot take a target: use the asset id in an Animation instance after it is published.");
     const name = (args.name ?? "").trim();
     if (!name) throw new Error("name is required.");
     if (name.length > NAME_MAX) throw new Error(`name is too long (limit ${NAME_MAX} characters).`);
     const description = args.description ?? name;
     if (description.length > DESCRIPTION_MAX) throw new Error(`description is too long (limit ${DESCRIPTION_MAX} characters).`);
     const target = args.target ? normaliseTarget(args.kind, args.target) : undefined;
+    const universeId = await this.resolveUniverse(args.universeId, target);
 
     const media = await inspectMedia(args.path, args.kind);
     const fileName = path.basename(media.file);
@@ -144,15 +168,17 @@ export class Publisher {
       target,
       copyright,
       acceptedPhrases,
+      universeId,
       createdAt: Date.now(),
     };
     await this.deps.store.mutate((s) => void (s.prepares[prepareId] = prepared));
     this.deps.log("prepared", prepareId, args.kind);
 
     const measure =
-      args.kind === "audio" ? `Duration: ${media.durationSeconds!.toFixed(1)} s` : `Dimensions: ${media.width}x${media.height}`;
+      args.kind === "audio" ? `Duration: ${media.durationSeconds!.toFixed(1)} s` : args.kind === "image" ? `Dimensions: ${media.width}x${media.height}` : "Format: binary .rbxm";
+    const noun = args.kind === "audio" ? "a sound" : args.kind === "image" ? "an image" : "an animation";
     const summary = [
-      `Ready to publish ${args.kind === "audio" ? "a sound" : "an image"} to Roblox. Nothing has been uploaded yet.`,
+      `Ready to publish ${noun} to Roblox. Nothing has been uploaded yet.`,
       `Name: ${name}`,
       `Description: ${description}`,
       `File: ${media.file}`,
@@ -161,6 +187,8 @@ export class Publisher {
       `SHA-256: ${media.sha256}`,
       `Account: ${this.creatorText()}`,
       target ? `Target: ${target.path} (${target.class}.${target.property}), placeholder until moderation approves` : "Target: none",
+      universeId ? `Experience access: after the upload, experience ${universeId} gets permission to use this asset.` : NO_UNIVERSE_NOTE,
+      ...(args.kind === "animation" ? [ANIMATION_ROOT_NOTE] : []),
       ...copyrightLines(args.kind, copyright),
       RESPONSIBILITY_NOTICE,
       ...(this.deps.cloud && this.deps.config.creator ? [] : ["Publishing is not configured yet: set ROBLOX_PUBLISH_API_KEY and a creator id before publish_asset."]),
@@ -178,6 +206,7 @@ export class Publisher {
       height: media.height,
       target,
       copyright,
+      universeId,
       requiredPhrase: acceptedPhrases[0],
       acceptedPhrases,
       summary,
@@ -185,6 +214,17 @@ export class Publisher {
   }
 
   async publishAsset(args: { prepareId: string; confirmation: string }) {
+    if (this.deps.store.read().prepares[args.prepareId]?.kind === "animation") throw new Error("This prepareId is an animation: use publish_animation.");
+    return this.publishPrepared(args);
+  }
+
+  async publishAnimation(args: { prepareId: string; confirmation: string }) {
+    const prepared = this.deps.store.read().prepares[args.prepareId];
+    if (prepared && prepared.kind !== "animation") throw new Error(`This prepareId is ${prepared.kind === "audio" ? "a sound" : "an image"}: use publish_asset.`);
+    return { ...(await this.publishPrepared(args)), note: `The animation is now in Roblox moderation; publish_status shows progress. ${ANIMATION_ROOT_NOTE}` };
+  }
+
+  private async publishPrepared(args: { prepareId: string; confirmation: string }) {
     const { prepareId } = args;
     const p = this.deps.store.read().prepares[prepareId];
     if (!p) throw new Error(`Unknown prepareId "${prepareId}". Call prepare_asset first.`);
@@ -203,13 +243,13 @@ export class Publisher {
       const cur = s.prepares[prepareId];
       if (cur.usedAt) throw new Error("This prepareId was already used. Call prepare_asset again.");
       cur.usedAt = now;
-      s.queue.push({ prepareId, kind: p.kind, name: p.name, status: "uploading", target: p.target, createdAt: now, updatedAt: now });
+      s.queue.push({ prepareId, kind: p.kind, name: p.name, status: "uploading", target: p.target, universeId: p.universeId, createdAt: now, updatedAt: now });
     });
 
     let op;
     try {
       op = await cloud.createAsset(p.kind, {
-        assetType: p.kind === "audio" ? "Audio" : "Decal",
+        assetType: ASSET_TYPE[p.kind],
         displayName: p.name,
         description: p.description,
         creator,
@@ -245,6 +285,8 @@ export class Publisher {
       target: e.target,
       place: e.place,
       placeholder: e.placeholder,
+      universeId: e.universeId === undefined ? undefined : String(e.universeId),
+      grant: e.grant,
       createdAt: new Date(e.createdAt).toISOString(),
       updatedAt: new Date(e.updatedAt).toISOString(),
     };

@@ -161,6 +161,26 @@ local function buildT(ctx)
 		end
 	end
 
+	-- every player in the test; with minCount, waits until that many have joined
+	function T.players(minCount, timeout)
+		local Players = game:GetService("Players")
+		if minCount == nil then
+			return Players:GetPlayers()
+		end
+		timeout = timeout or DEFAULT_PLAYER_WAIT
+		local deadline = os.clock() + timeout
+		while true do
+			local list = Players:GetPlayers()
+			if #list >= minCount then
+				return list
+			end
+			if os.clock() >= deadline then
+				error(string.format("only %d of %d players joined within %gs", #list, minCount, timeout), 0)
+			end
+			task.wait(0.03)
+		end
+	end
+
 	function T.character(timeout)
 		timeout = timeout or DEFAULT_PLAYER_WAIT
 		local player = T.player(timeout)

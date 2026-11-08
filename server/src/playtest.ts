@@ -18,12 +18,16 @@ const CLIENT_GRACE_MS = 10_000;
 const LIVE_WINDOW_MS = POLL_HOLD_MS + 5_000;
 
 const askToPress = (key: string) => `Ask the user to press ${key} in Studio`;
-const ASK_PLAY = (mode: string) => `${askToPress(mode === "run" ? "Run (F8)" : "Play (F5)")}, then call playtest_status until running is true.`;
+const PRESS: Record<string, string> = { run: "Run (F8)", multiplayer: "Start under the Test tab's Clients and Servers" };
+const ASK_PLAY = (mode: string) => `${askToPress(PRESS[mode] ?? "Play (F5)")}, then call playtest_status until running is true.`;
+/** Each extra client window takes Studio noticeably longer to bring up. */
+const GRACE_PER_EXTRA_CLIENT_MS = 5_000;
 
 export interface PlaytestStatus {
   running: boolean;
   mode?: string;
   contexts: { edit: boolean; server: boolean; client: boolean };
+  clients?: number;
   players?: string[];
   lastResult?: unknown;
   lastError?: string;
@@ -71,7 +75,9 @@ export class Playtests {
     if (e?.lastError) out.lastError = e.lastError;
     if (running) {
       const s = await this.ask(server, "playtest_status");
-      out.mode = s?.mode ?? e?.mode;
+      out.clients = this.live("client", args.place).length;
+      // only the edit DataModel knows it asked for multiplayer; the server just sees players
+      out.mode = e?.mode === "multiplayer" ? e.mode : (s?.mode ?? e?.mode);
       if (s?.players) out.players = s.players;
       if (!server) out.note = "A test is running but the plugin has not connected from it yet; call playtest_status again in a moment.";
     } else {
@@ -84,14 +90,17 @@ export class Playtests {
 
   async start(args: Args): Promise<Args> {
     const mode: string = args.mode;
-    if (mode !== "play" && mode !== "run") throw new Error('mode must be "play" or "run"');
+    if (mode !== "play" && mode !== "run" && mode !== "multiplayer") throw new Error('mode must be "play" or "run"');
     const edit = this.bridge.pick("edit", args.place);
-    const timeoutMs = Math.min(Math.max(1, Number(args.timeout ?? 60)), 300) * 1000;
+    const expected = mode === "multiplayer" ? Number(args.clients) : mode === "play" ? 1 : 0;
+    const timeoutMs = Math.min(Math.max(1, Number(args.timeout ?? (mode === "multiplayer" ? 120 : 60))), 300) * 1000;
+    const clientGrace = CLIENT_GRACE_MS + Math.max(0, expected - 1) * GRACE_PER_EXTRA_CLIENT_MS;
     const t0 = Date.now();
 
     // the plugin refuses when a test already runs; a lost answer is not a
     // refusal, so keep waiting for the contexts in that case
-    await this.bridge.send(edit.id, "playtest_start", { mode }, START_ANSWER_MS).catch((e: any) => {
+    const payload = mode === "multiplayer" ? { mode, clients: expected } : { mode };
+    await this.bridge.send(edit.id, "playtest_start", payload, START_ANSWER_MS).catch((e: any) => {
       if (!/did not answer/.test(String(e?.message))) throw e;
     });
 
@@ -99,14 +108,14 @@ export class Playtests {
     let serverAt = 0;
     let lastPoll = 0;
     let server: SessionInfo | undefined;
-    let client: SessionInfo | undefined;
+    let clients: SessionInfo[] = [];
     while (Date.now() < deadline) {
       server = this.live("server", args.place).find((s) => s.connectedAt >= t0);
-      client = this.live("client", args.place).find((s) => s.connectedAt >= t0);
-      if (server && (mode === "run" || client)) break;
+      clients = this.live("client", args.place).filter((s) => s.connectedAt >= t0);
+      if (server && clients.length >= expected) break;
       if (server) {
         serverAt ||= Date.now();
-        if (Date.now() - serverAt > CLIENT_GRACE_MS) break;
+        if (Date.now() - serverAt > clientGrace) break;
       } else if (Date.now() - lastPoll >= 1000) {
         lastPoll = Date.now();
         const st = await this.ask(edit, "playtest_status", 2_000);
@@ -119,9 +128,25 @@ export class Playtests {
         `The play-test did not connect within ${Math.round(timeoutMs / 1000)}s: the RoLink plugin must be enabled for play-test DataModels. If Studio shows no test running, ${ASK_PLAY(mode)}`,
       );
     }
-    const out: Args = { started: true, mode, contexts: { edit: true, server: !!server, client: !!client } };
-    if (mode === "play" && !client) out.note = "The client context has not connected; scenarios and output_read can still use the server context.";
+    const out: Args = { started: true, mode, contexts: { edit: true, server: !!server, client: clients.length > 0 } };
+    if (mode === "multiplayer") out.clients = clients.length;
+    if (mode === "play" && clients.length === 0) out.note = "The client context has not connected; scenarios and output_read can still use the server context.";
+    if (mode === "multiplayer" && clients.length < expected) out.note = `Only ${clients.length} of ${expected} clients have connected so far; call playtest_status to see the rest join.`;
     return out;
+  }
+
+  async multiplayer(args: Args): Promise<Args> {
+    const clients = args.clients;
+    if (!Number.isInteger(clients) || clients < 1 || clients > 8) throw new Error("clients must be a whole number from 1 to 8.");
+    return this.start({ ...args, mode: "multiplayer" });
+  }
+
+  async profile(args: Args): Promise<Args> {
+    const context: Context = args.context ?? "server";
+    if (context === "edit") throw new PluginError('Script profiling works inside a play-test: use context "server" or "client".');
+    const duration = Math.min(Math.max(0.01, Number(args.duration ?? 5)), 60);
+    const s = await this.runningSession(context, args.place, args.client);
+    return this.bridge.send(s.id, "profile_scripts", { ...pick(args, ["frequency", "top"]), duration }, (duration + 30) * 1000);
   }
 
   async stop(args: Args): Promise<Args> {
@@ -143,9 +168,15 @@ export class Playtests {
   }
 
   /** A session of a test that is really running, or an actionable error. */
-  private async runningSession(context: Context, place?: string): Promise<SessionInfo> {
+  private async runningSession(context: Context, place?: string, client?: number): Promise<SessionInfo> {
     const st = await this.status({ place });
     if (!st.running) throw new PluginError("No play-test is running. Call playtest_start first (or ask the user to press Play in Studio).");
+    if (context === "client" && client !== undefined) {
+      const joined = this.live("client", place).sort((a, b) => a.connectedAt - b.connectedAt);
+      const chosen = joined[client - 1];
+      if (!chosen) throw new PluginError(`There is no client ${client}: ${joined.length} client(s) are connected.`);
+      return chosen;
+    }
     const s = this.live(context, place)[0];
     if (!s) {
       throw new PluginError(
@@ -160,7 +191,7 @@ export class Playtests {
     if (context === "edit") throw new PluginError('playtest_scenario runs inside a play-test: use context "server" or "client" (use run for edit-mode Luau).');
     if (typeof args.source !== "string") throw new Error("source (Luau code) is required");
     const timeout = Math.min(Math.max(1, Number(args.timeout ?? 60)), 600);
-    const s = await this.runningSession(context, args.place);
+    const s = await this.runningSession(context, args.place, args.client);
     // the plugin enforces `timeout` itself; we wait a bit longer for its report
     try {
       return await this.bridge.send(s.id, "playtest_scenario", { source: args.source, args: args.args, timeout }, (timeout + 15) * 1000);
@@ -176,7 +207,7 @@ export class Playtests {
       const st = await this.status(args);
       context = st.contexts.server ? "server" : "edit";
     }
-    const s = context === "edit" ? this.bridge.pick("edit", args.place) : await this.runningSession(context, args.place);
+    const s = context === "edit" ? this.bridge.pick("edit", args.place) : await this.runningSession(context, args.place, args.client);
     const r = await this.bridge.send(s.id, "output_read", pick(args, ["since", "level", "limit", "contains"]), 15_000);
     return { context, ...r };
   }

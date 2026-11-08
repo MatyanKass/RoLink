@@ -9,6 +9,8 @@ export interface StudioSession {
   context: string;
   placeName: string;
   placeId: number;
+  /** 0 for a place that was never published. */
+  gameId?: number;
   connectedAt: number;
 }
 

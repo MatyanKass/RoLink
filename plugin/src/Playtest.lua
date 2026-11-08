@@ -41,11 +41,13 @@ local function editModeActive(svc)
 end
 
 local function askUser(mode, why)
-	return string.format(
-		'Could not start a play-test from the plugin: %s. Ask the user to press %s in Studio, then call playtest_status until running is true.',
-		tostring(why),
-		mode == "run" and "Run (F8)" or "Play (F5)"
-	)
+	local press = "Play (F5)"
+	if mode == "run" then
+		press = "Run (F8)"
+	elseif mode == "multiplayer" then
+		press = "Start under the Test tab's Clients and Servers"
+	end
+	return string.format('Could not start a play-test from the plugin: %s. Ask the user to press %s in Studio, then call playtest_status until running is true.', tostring(why), press)
 end
 
 function Playtest.output()
@@ -95,8 +97,12 @@ end
 
 function Playtest.start(args)
 	local mode = args.mode
-	if mode ~= "play" and mode ~= "run" then
-		error('mode must be "play" or "run"', 0)
+	if mode ~= "play" and mode ~= "run" and mode ~= "multiplayer" then
+		error('mode must be "play", "run" or "multiplayer"', 0)
+	end
+	local clients = args.clients
+	if mode == "multiplayer" and (type(clients) ~= "number" or clients % 1 ~= 0 or clients < 1 or clients > 8) then
+		error("clients must be a whole number from 1 to 8, got " .. tostring(clients), 0)
 	end
 	if context() ~= "edit" then
 		error("a play-test can only be started from the edit context", 0)
@@ -121,9 +127,16 @@ function Playtest.start(args)
 			if mode == "run" then
 				return svc:ExecuteRunModeAsync(arg)
 			end
+			if mode == "multiplayer" then
+				return svc:ExecuteMultiplayerTestAsync(clients, arg)
+			end
 			return svc:ExecutePlayModeAsync(arg)
 		end)
 		state.starting = false
+		if mode == "multiplayer" then
+			-- or a later test the user starts by hand would be reported as multiplayer
+			state.mode = nil
+		end
 		finished = true
 		if ok then
 			state.lastResult = (type(res) == "string" or type(res) == "number" or type(res) == "boolean") and res or (res ~= nil and tostring(res) or nil)
@@ -140,7 +153,7 @@ function Playtest.start(args)
 	if failure then
 		error(askUser(mode, failure), 0)
 	end
-	return { started = true, mode = mode, state = editModeActive(svc) == false and "running" or "starting" }
+	return { started = true, mode = mode, clients = clients, state = editModeActive(svc) == false and "running" or "starting" }
 end
 
 function Playtest.status()

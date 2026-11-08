@@ -843,6 +843,23 @@ Ops.mutating.toolbox_insert = true
 Ops.mutating.toolbox_release = true
 Ops.mutating.animation_build = true
 
+-- ------------------------------------------------------------------ editor actions, performance
+
+local Editor = require(script.Parent.Editor)
+local Perf = require(script.Parent.Perf)
+
+for _, name in { "align", "distribute", "weld_model", "set_collision_groups", "select_and_focus", "script_search", "script_diagnostics", "generate_model" } do
+	Ops[name] = Editor[name]
+end
+Ops.perf_stats = Perf.stats
+Ops.profile_scripts = Perf.profile
+for _, name in { "align", "distribute", "weld_model", "set_collision_groups", "generate_model" } do
+	Ops.mutating[name] = true
+end
+-- off the worker queue, so a scenario can generate the load being measured
+Ops.concurrent.perf_stats = true
+Ops.concurrent.profile_scripts = true
+
 -- ------------------------------------------------------------------ confirmation
 
 function Ops.confirm_dialog(args)

@@ -22,7 +22,34 @@ async function connect(t, env = {}) {
 test("exposes exactly the agreed tools", async (t) => {
   const c = await connect(t);
   const { tools } = await c.listTools();
-  assert.deepEqual(tools.map((x) => x.name).sort(), ["place_publish", "place_save", "prepare_asset", "publish_asset", "publish_status"]);
+  assert.deepEqual(tools.map((x) => x.name).sort(), [
+    "asset_quota",
+    "datastore_delete",
+    "datastore_get",
+    "datastore_list",
+    "datastore_set",
+    "place_publish",
+    "place_save",
+    "prepare_asset",
+    "publish_animation",
+    "publish_asset",
+    "publish_status",
+    "server_restart",
+  ]);
+});
+
+test("reads are marked read-only and there is no bulk delete", async (t) => {
+  const c = await connect(t);
+  const { tools } = await c.listTools();
+  for (const name of ["asset_quota", "datastore_list", "datastore_get"]) assert.equal(tools.find((x) => x.name === name).annotations.readOnlyHint, true, name);
+  for (const name of ["datastore_set", "datastore_delete", "server_restart"]) assert.notEqual(tools.find((x) => x.name === name).annotations.readOnlyHint, true, name);
+  for (const x of tools) assert.doesNotMatch(x.name, /bulk|delete_all|clear|flush/i);
+});
+
+test("datastore_set warns that an update clears omitted fields", async (t) => {
+  const c = await connect(t);
+  const { tools } = await c.listTools();
+  assert.match(tools.find((x) => x.name === "datastore_set").description, /clear/i);
 });
 
 test("no tool can change privacy or make a game public", async (t) => {
@@ -34,7 +61,7 @@ test("no tool can change privacy or make a game public", async (t) => {
 test("descriptions tell the agent to wait for the user's typed phrase", async (t) => {
   const c = await connect(t);
   const { tools } = await c.listTools();
-  for (const name of ["prepare_asset", "publish_asset"]) {
+  for (const name of ["prepare_asset", "publish_asset", "publish_animation"]) {
     const d = tools.find((x) => x.name === name).description;
     assert.match(d, /show .*summary.* user/i, name);
     assert.match(d, /wait/i, name);

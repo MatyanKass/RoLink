@@ -16,6 +16,7 @@ import { uploadConfig, uploadModel } from "./assetupload.js";
 import { Playtests } from "./playtest.js";
 import { toolboxInsert, toolboxRelease, toolboxSearch } from "./toolbox.js";
 import { importAnimation } from "./animation.js";
+import { editorTool } from "./editor.js";
 
 export interface ImageOut {
   data: string; // base64
@@ -147,6 +148,22 @@ export class Core {
         return json(await this.playtests.scenario(args));
       case "output_read":
         return json(await this.playtests.outputRead(args));
+      case "multiplayer_test":
+        return json(await this.playtests.multiplayer(args));
+      case "profile_scripts":
+        return json(await this.playtests.profile(args));
+      case "perf_stats":
+        return json(await this.op(args, "perf_stats", pick(args, ["sample"]), 15_000));
+      case "align":
+      case "distribute":
+      case "weld_model":
+      case "set_collision_groups":
+      case "select_and_focus":
+      case "script_outline":
+      case "script_search":
+      case "script_diagnostics":
+      case "generate_model":
+        return editorTool(tool, args, (op, p, t) => this.op(args, op, p, t));
       case "confirm_dialog":
         // the plugin closes the dialog itself at `timeout`; wait a bit longer for its answer
         return json(await this.op(args, "confirm_dialog", pick(args, ["title", "text", "confirmLabel", "timeout"]), (Number(args.timeout ?? 120) + 15) * 1000));

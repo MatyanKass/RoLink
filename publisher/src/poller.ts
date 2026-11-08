@@ -20,8 +20,14 @@ export interface PollerDeps {
   intervalMs?: number;
 }
 
+function needsGrant(e: QueueEntry) {
+  if (!e.universeId || !e.assetId || e.status === "rejected" || e.status === "failed") return false;
+  return !e.grant || e.grant.status === "pending";
+}
+
 function isActive(e: QueueEntry) {
   if (e.status === "uploading" || e.status === "processing" || e.status === "reviewing") return true;
+  if (needsGrant(e)) return true;
   return e.status === "approved" && !!e.target;
 }
 
@@ -105,7 +111,24 @@ export class Poller {
     }
 
     e = this.entry(prepareId);
+    if (e && needsGrant(e) && this.deps.cloud && Date.now() >= this.cloudPausedUntil) await this.grantUse(e);
+
+    e = this.entry(prepareId);
     if (e?.status === "approved" && e.target) await this.applyApproved(e);
+  }
+
+  /** The upload stands whatever happens here, so a failure is only recorded. */
+  private async grantUse(e: QueueEntry) {
+    try {
+      await this.deps.cloud!.grantUse(e.universeId!, e.assetId!);
+      this.deps.log("granted use", e.prepareId, e.universeId);
+      await this.deps.store.update(e.prepareId, { grant: { status: "granted" } });
+    } catch (err) {
+      const retry = err instanceof CloudError && (err.kind === "rate_limit" || err.kind === "network" || err.kind === "server");
+      if (retry) await this.noteCloudError(err, e.prepareId);
+      else this.deps.log("grant failed", e.prepareId, err);
+      await this.deps.store.update(e.prepareId, { grant: { status: retry ? "pending" : "failed", error: this.text(err) } });
+    }
   }
 
   private async checkOperation(e: QueueEntry, known?: Operation) {

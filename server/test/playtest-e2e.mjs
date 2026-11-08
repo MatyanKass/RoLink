@@ -84,7 +84,10 @@ export default async function run() {
 
   const { tools } = await c.listTools();
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-  for (const n of ["playtest_start", "playtest_stop", "playtest_status", "output_read", "playtest_scenario"]) ok(byName[n], `tool ${n} registered`);
+  for (const n of ["playtest_start", "playtest_stop", "playtest_status", "output_read", "playtest_scenario", "multiplayer_test", "profile_scripts", "perf_stats", "align", "distribute", "weld_model", "set_collision_groups", "select_and_focus", "script_outline", "script_search", "script_diagnostics", "generate_model"]) ok(byName[n], `tool ${n} registered`);
+  ok(!byName.generate_material, "no generate_material: Roblox documents no plugin API for it");
+  ok(/T\.players/.test(guide) && /multiplayer_test/.test(guide), "guide documents multiplayer testing");
+  for (const n of ["profile_scripts", "perf_stats", "script_outline", "script_search", "script_diagnostics"]) ok(byName[n].annotations.readOnlyHint === true, `${n} is read-only`);
   ok(/discard|lost/i.test(byName.playtest_start.description) && /edit/i.test(byName.playtest_start.description), "playtest_start warns about state");
   ok(byName.playtest_status.annotations.readOnlyHint === true, "status is read-only");
 
@@ -97,6 +100,8 @@ export default async function run() {
   // ------------------------------------------------------------ mock Studio
   let editActive = true;
   let server, client;
+  let extraClients = [];
+  let editMode = "play";
   let failStart = null;
   let lastError = null;
   const startCalls = [];
@@ -117,6 +122,8 @@ export default async function run() {
         return { ok: true, context: "server", summary: "1/1 steps passed", steps: [{ name: "a", ok: true, duration: 0.1, logs: [], errors: [] }], logs: [], errors: [], timeout: args.timeout, source: args.source, output: { lastSeq: 9 } };
       case "output_read":
         return { context: "server", entries: [{ seq: 5, level: "output", text: "hi server" }], next: 5, args };
+      case "profile_scripts":
+        return { context: "server", functions: [], args };
     }
     throw "unknown op " + op;
   };
@@ -131,12 +138,20 @@ export default async function run() {
     }
     throw "unknown op " + op;
   };
-  async function beginTest(mode) {
+  async function beginTest(mode, clients = 1) {
     editActive = false;
     await sleep(100);
     server = new FakeDM("server", serverHandler);
     await server.connect();
-    if (mode === "play") {
+    if (mode === "multiplayer") {
+      for (let i = 1; i <= clients; i++) {
+        const dm = new FakeDM("client", (op, args) => (op === "output_read" ? { context: "client", entries: [{ seq: 7, level: "output", text: `hi client ${i}` }], next: 7, args } : clientHandler(op, args)));
+        await dm.connect();
+        await sleep(5); // distinct connectedAt, so the order is stable
+        extraClients.push(dm);
+      }
+      client = extraClients[0];
+    } else if (mode === "play") {
       client = new FakeDM("client", clientHandler);
       await client.connect();
     } else client = undefined;
@@ -144,7 +159,9 @@ export default async function run() {
   async function endTest() {
     editActive = true;
     await server?.bye();
-    await client?.bye();
+    for (const dm of extraClients) await dm.bye();
+    if (!extraClients.length) await client?.bye();
+    extraClients = [];
     server = client = undefined;
   }
 
@@ -155,10 +172,11 @@ export default async function run() {
         startCalls.push(args);
         if (failStart) throw failStart;
         if (!editActive) throw "A play-test is already running (mock)";
-        beginTest(args.mode);
+        editMode = args.mode;
+        beginTest(args.mode, args.clients);
         return { started: true, mode: args.mode, state: "starting" };
       case "playtest_status":
-        return { context: "edit", editModeActive: editActive, running: !editActive, mode: "play", lastError };
+        return { context: "edit", editModeActive: editActive, running: !editActive, mode: editMode, lastError };
       case "playtest_request_stop":
         stopFlag = true;
         return { requested: true };
@@ -242,6 +260,47 @@ export default async function run() {
   ok(!r.isError && JSON.parse(text(r)).stopped === true, "stop: " + text(r));
   r = await call("playtest_status");
   ok(JSON.parse(text(r)).running === false, "stopped");
+
+  // ------------------------------------------------------------ multiplayer and profiling
+  r = await call("multiplayer_test", { clients: 0 });
+  ok(r.isError && /1 to 8/.test(text(r)), "clients out of range: " + text(r));
+  r = await call("multiplayer_test", { clients: 9 });
+  ok(r.isError && /1 to 8/.test(text(r)), "clients out of range: " + text(r));
+  r = await call("profile_scripts", { duration: 1 });
+  ok(r.isError && text(r).includes("playtest_start"), "profiling needs a test: " + text(r));
+
+  r = await call("multiplayer_test", { clients: 2 });
+  ok(!r.isError, "multiplayer start: " + text(r));
+  st = JSON.parse(text(r));
+  ok(st.started && st.mode === "multiplayer" && st.clients === 2 && st.contexts.server && st.contexts.client, "waits for every client: " + text(r));
+  ok(startCalls.at(-1).mode === "multiplayer" && startCalls.at(-1).clients === 2, "client count forwarded");
+
+  r = await call("playtest_status");
+  st = JSON.parse(text(r));
+  ok(st.running && st.mode === "multiplayer" && st.clients === 2, "status counts clients: " + text(r));
+
+  r = await call("output_read", { context: "client", client: 2 });
+  ok(JSON.parse(text(r)).entries[0].text === "hi client 2", "output_read picks a client: " + text(r));
+  r = await call("output_read", { context: "client", client: 1 });
+  ok(JSON.parse(text(r)).entries[0].text === "hi client 1", "client numbers follow join order: " + text(r));
+  r = await call("output_read", { context: "client", client: 3 });
+  ok(r.isError && /client 3/.test(text(r)), "a client that does not exist: " + text(r));
+  r = await call("playtest_scenario", { source: "x", context: "client", client: 2 });
+  ok(!r.isError && extraClients[1].received.some((cmd) => cmd.op === "playtest_scenario"), "scenario runs on the chosen client: " + text(r));
+
+  r = await call("profile_scripts", { duration: 2, frequency: 100, top: 5 });
+  ok(!r.isError, "profile: " + text(r));
+  let prof = JSON.parse(text(r));
+  ok(prof.context === "server" && prof.args.duration === 2 && prof.args.frequency === 100 && prof.args.top === 5, "profile defaults to the server and forwards options: " + text(r));
+  r = await call("profile_scripts", { duration: 1, context: "edit" });
+  ok(r.isError && /play-test/.test(text(r)), "profiling the edit context refused: " + text(r));
+
+  r = await call("playtest_stop");
+  ok(!r.isError && JSON.parse(text(r)).stopped === true, "multiplayer stop: " + text(r));
+  editMode = "play";
+
+  r = await call("perf_stats", { sample: 0.5 });
+  ok(!r.isError && JSON.parse(text(r)).args.sample === 0.5 && JSON.parse(text(r)).op === "perf_stats", "perf_stats reaches the edit context: " + text(r));
 
   // a dead server session that never said bye must not count as a running test
   await beginTest("run");

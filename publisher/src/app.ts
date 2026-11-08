@@ -1,5 +1,6 @@
 // Wires the parts together. Tests call this with fakes; index.ts with the real thing.
 
+import { CloudTools } from "./cloudtools.js";
 import { defaultStateDir, loadConfig, makeLog, Redactor, stderrSink } from "./config.js";
 import { providersFromEnv } from "./copyright.js";
 import { OpenCloud } from "./opencloud.js";
@@ -31,5 +32,6 @@ export function createPublisher(opts: CreateOptions = {}) {
   const rolink = new RoLinkClient(Number(env.ROLINK_PORT ?? 34872));
   const poller = new Poller({ store, cloud, rolink, redactor, log });
   const publisher = new Publisher({ config, store, cloud, rolink, poller, providers: providersFromEnv(env, fetchImpl), redactor, log });
-  return { publisher, poller, cloud, store, redactor, log, close: () => poller.stop() };
+  const tools = new CloudTools({ config, cloud, rolink, redactor, log });
+  return { publisher, tools, poller, cloud, store, redactor, log, close: () => poller.stop() };
 }
