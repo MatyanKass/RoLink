@@ -77,7 +77,7 @@ and is a property; `Parent` `Name` `Source` `ClassName` and `__proto__` are reje
   written; every creatable class works through `Instance.new`.
 - Reading: only non-default values are written (default = a fresh instance with builder defaults:
   parts Anchored, smooth top/bottom). BaseParts always carry `CFrame` and `Size`. Skipped as derived:
-  Position, Orientation, Rotation, BrickColor (on parts), World* axes, WorldPivot, Source.
+  Position, Orientation, Rotation (on parts and attachments only), BrickColor, World* axes, WorldPivot, Source.
 - Writing: a property absent from a file is not changed. `attrs` / `tags` when present are the full set;
   `children` when present is the full list (absent: untouched).
 - `Pivot` (Model): world frame, applied through PivotTo before the other properties of the same edit.
