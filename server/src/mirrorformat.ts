@@ -744,6 +744,9 @@ The owner of a sub-file is a part path inside the model, parts joined with "+":
 - \`Pivot\` on a model moves the whole model (WORLD frame). Part CFrames are WORLD too.
 - \`_info\` in model.json is read-only and regenerated: joints, attached objects,
   size, part count, touching/overlapping neighbours. Your changes to it are ignored.
+- \`Position\`, \`Rotation\` and \`Orientation\` are never written to these files, on any class
+  (GUI objects included). Setting one in a file works, but the key is gone after it is
+  applied; read the value with the MCP \`get\` tool.
 
 ## How to
 
@@ -794,4 +797,11 @@ within 60 seconds across batches) and the files come back; use the MCP delete to
 big deletions, or edit Studio. \`children\` is not allowed in \`_props.json\`. Properties
 affecting place security or outside code (LoadStringEnabled, HttpEnabled, AllowThirdPartySales,
 ...) cannot be set from files; change them in Studio.
+
+## More detail
+
+The MCP server's \`guide\` tool documents all of this. Call \`guide()\` for the list of topics,
+\`guide({topic:"mirror-reference"})\` for this format in full, or \`guide({search:"..."})\` to grep.
+Useful topics: mirror-basics, mirror-reference, property-types, gui, scripts, models-and-parts,
+unions-csg, terrain, playtest-and-scenarios, limits-and-known-gaps, troubleshooting.
 `;

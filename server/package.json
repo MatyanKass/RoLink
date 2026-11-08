@@ -6,7 +6,7 @@
   "description": "RoLink: MCP server + live bridge to Roblox Studio",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p . && node scripts/copy-docs.mjs",
     "start": "node dist/index.js",
     "typecheck": "tsc -p . --noEmit",
     "serve": "node dist/index.js --daemon",
@@ -14,7 +14,7 @@
     "plugin:build": "node ../plugin/build.mjs",
     "plugin:install": "node ../plugin/build.mjs --install",
     "test:plugin": "node test/run-plugin-tests.mjs",
-    "test:unit": "node --test test/meshimport.test.mjs test/mirror.test.mjs test/mirror.session.test.mjs test/toolbox.test.mjs test/animation.test.mjs test/editor.test.mjs"
+    "test:unit": "node --test test/meshimport.test.mjs test/mirror.test.mjs test/mirror.session.test.mjs test/toolbox.test.mjs test/animation.test.mjs test/editor.test.mjs test/guide.test.mjs"
   },
   "engines": {
     "node": ">=20"
