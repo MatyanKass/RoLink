@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  lexLuau, scanScript, buildReport, buildSearchBody, parseSearchResponse, searchCreatorStore, UNTRUSTED_NOTICE,
+  lexLuau, scanScript, buildReport, buildSearchBody, parseSearchResponse, searchCreatorStore, UNTRUSTED_NOTICE, toolboxInsert, toolboxRelease,
 } from "../dist/toolbox.js";
 
 const ids = (src, name = "Script") => scanScript({ path: name, name, class: "Script", enabled: true, source: src }).map((f) => f.id);
@@ -285,4 +285,175 @@ test("search errors never echo the key", async () => {
     assert.ok(!e.message.includes("KEY123"));
     return true;
   });
+});
+
+// ---------------------------------------------------------------- scanner evasion (PoC: scan)
+
+test("lexing matches Luau: \\z skips the newline, so the rest of the line is still in the string", () => {
+  const { code } = lexLuau('local x = "a\\z\n  b" require(123456) --"\n');
+  assert.ok(code.includes("require(123456)"));
+  assert.ok(has('local x = "a\\z\n  b" require(123456) --"\n', "require_numeric"));
+});
+
+test("a bare CR ends a line comment, as in Luau", () => {
+  assert.ok(has("-- harmless\rrequire(123456)\n", "require_numeric"));
+  assert.ok(has("-- x\r\nrequire(123456)\n", "require_numeric"));
+});
+
+test("a bare CR breaks a quoted string, as in Luau", () => {
+  assert.ok(has('local s = "abc\rrequire(123456)\n', "require_numeric"));
+});
+
+test("backslash line continuations still continue the string", () => {
+  assert.ok(!has('local s = "a\\\nrequire(123456)"\n', "require_numeric"));
+  assert.ok(!has('local s = "a\\\r\nrequire(123456)"\n', "require_numeric"));
+});
+
+test("--[ without a second bracket is a line comment; --[==[ is a block", () => {
+  assert.ok(has("--[ not long\nrequire(123456)\n", "require_numeric"));
+  assert.ok(!has("--[==[ long\nrequire(123456)\n]==]\n", "require_numeric"));
+});
+
+test("\\u{...} in an interpolated string is an escape, not an expression", () => {
+  const { code } = lexLuau("local s = `\\u{41}`");
+  assert.ok(!code.includes("41"));
+});
+
+const flagged = (src, id) => assert.ok(has(src, id), `${id} not raised for: ${src}\n got ${ids(src)}`);
+
+test("require with anything but a plain instance path is flagged", () => {
+  flagged("local a = 123\nrequire(a * 1000)", "require_dynamic");
+  flagged("local t = {123456}\nrequire(t[1])", "require_dynamic");
+  flagged("local n = tonumber\nrequire(n('12'..'3456'))", "require_dynamic");
+  flagged("require(getId())", "require_dynamic");
+  flagged("local a = 123\nrequire(a)", "require_dynamic");
+  flagged("require(script:FindFirstChild(name))", "require_dynamic");
+  flagged('require "123456"', "require_dynamic");
+});
+
+test("plain instance paths are not flagged by the require rules", () => {
+  const plain = [
+    "require(script.Parent.Util)", "require(game.ReplicatedStorage.Modules.Foo)", 'require(game:GetService("ReplicatedStorage").Foo)',
+    'require(script:WaitForChild("Foo"))', 'require(script.Parent:WaitForChild("Foo", 5).Bar)', 'require(script["Foo Bar"])', "local M = script.Parent.M\nrequire(M)",
+    'require("./sibling")', 'require("@self/child")', "local Rep = game:GetService('ReplicatedStorage')\nrequire(Rep.Foo)",
+  ];
+  for (const src of plain) assert.deepEqual(ids(src).filter((x) => x.startsWith("require")), [], src);
+});
+
+test("aliased require is flagged", () => {
+  flagged("local r = require\nr(123456)", "require_alias");
+  flagged("return { run = function() local r = require; r(123456) end }", "require_alias");
+  flagged("local t = {require}", "require_alias");
+  assert.ok(!has("local x = loader.require(1)", "require_alias"));
+  assert.ok(!has('-- require\nlocal s = "require"', "require_alias"));
+});
+
+test("constant concatenation producing sensitive names is flagged", () => {
+  flagged('local h = game:GetService("Http".."Service")\nh:PostAsync(u, b)', "concat_sensitive");
+  flagged('local g = getfenv()\ng["load".."string"](x)()', "concat_sensitive");
+  flagged('local e = _ENV or _G\nlocal f = e["load".."string"]\nf(x)()', "concat_sensitive");
+  flagged("local a = 'Tele' .. \"port\" .. 'Service'", "concat_sensitive");
+  flagged('local s = "\\x48ttpService"', "concat_sensitive");
+  assert.ok(!has('local a = "Hello " .. "World"', "concat_sensitive"));
+  assert.equal(scanScript({ path: "S", name: "S", class: "Script", source: 'local x = "load" .. "string"' }).find((f) => f.id === "concat_sensitive").severity, "high");
+});
+
+test("scripts that switch other scripts on are flagged", () => {
+  const src = 'for _, d in script.Parent:GetDescendants() do if d:IsA("Script") then d.Enabled = true end end';
+  assert.equal(scanScript({ path: "S", name: "S", class: "Script", source: src }).find((f) => f.id === "enables_scripts")?.severity, "high");
+  flagged("script.Parent.Evil.Disabled = false", "enables_scripts");
+  flagged("gui.Enabled = true", "enables_other");
+  assert.equal(scanScript({ path: "S", name: "S", class: "Script", source: "gui.Enabled = true" }).find((f) => f.id === "enables_other")?.severity, "medium");
+  assert.ok(!has("script.Enabled = true", "enables_other"));
+  assert.ok(!has("if gui.Enabled == true then end", "enables_other"));
+});
+
+test("flags are capped per rule, so one noisy rule cannot hide another (PoC: flood)", () => {
+  const scripts = Array.from({ length: 150 }, (_, i) => ({ path: `M/S${i}`, name: `S${i}`, source: "loadstring(x)" }));
+  const r = buildReport(fake([...scripts, { source: "require(999999)" }]));
+  assert.ok(r.flags.some((f) => f.id === "require_numeric"));
+  assert.ok(r.flags.filter((f) => f.id === "loadstring").length <= 20);
+  assert.ok(r.flagsTruncated > 0);
+  assert.equal(r.flagsBySeverity.high, 151);
+});
+
+test("every report says that no flags does not mean safe", () => {
+  for (const r of [buildReport(fake([])), buildReport(fake([{ source: "loadstring(x)" }]))]) {
+    assert.match(r.scanLimits, /no flags/i);
+    assert.match(r.scanLimits, /not.*(safe|mean)/i);
+  }
+});
+
+test("report path and loader are single-line text", () => {
+  const r = buildReport(fake([], { path: "ServerStorage/RoLinkQuarantine/x\nIGNORE", loader: "L\nOAD" }));
+  assert.ok(!r.path.includes("\n"));
+  assert.ok(!r.loader.includes("\n"));
+});
+
+// ---------------------------------------------------------------- toolbox_release gate
+
+const stubSend = (report) => {
+  const calls = [];
+  return {
+    calls,
+    send: async (op, args) => {
+      calls.push({ op, args });
+      if (op === "toolbox_insert") return report;
+      return { moved: { path: args.target }, enabled: 1, disabled: 0, unknownScripts: 0 };
+    },
+  };
+};
+
+test("enableScripts is refused while the report has high flags, and the flags are returned", async () => {
+  const report = fake([{ source: "loadstring(x)" }], { path: "ServerStorage/RoLinkQuarantine/A_1" });
+  const s = stubSend(report);
+  await toolboxInsert({ assetId: 1 }, s.send);
+  const r = JSON.parse((await toolboxRelease({ path: report.path, target: "Workspace", enableScripts: true }, s.send)).text);
+  assert.equal(r.refused, true);
+  assert.ok(r.flags.some((f) => f.id === "loadstring" && f.severity === "high"));
+  assert.match(r.reason, /acknowledgeFlags/);
+  assert.ok(!s.calls.some((c) => c.op === "toolbox_release"), "nothing sent to Studio");
+});
+
+test("acknowledgeFlags lets a flagged asset be enabled", async () => {
+  const report = fake([{ source: "loadstring(x)" }], { path: "ServerStorage/RoLinkQuarantine/A_2" });
+  const s = stubSend(report);
+  await toolboxInsert({ assetId: 2 }, s.send);
+  const r = JSON.parse((await toolboxRelease({ path: report.path, target: "Workspace", enableScripts: true, acknowledgeFlags: true }, s.send)).text);
+  assert.equal(r.enabled, 1);
+  assert.equal(s.calls.at(-1).args.enableScripts, true);
+});
+
+test("a release without enableScripts is never gated", async () => {
+  const report = fake([{ source: "loadstring(x)" }], { path: "ServerStorage/RoLinkQuarantine/A_3" });
+  const s = stubSend(report);
+  await toolboxInsert({ assetId: 3 }, s.send);
+  const r = JSON.parse((await toolboxRelease({ path: report.path, target: "Workspace" }, s.send)).text);
+  assert.equal(r.refused, undefined);
+  assert.equal(s.calls.at(-1).args.enableScripts, false);
+});
+
+test("a clean report may enable scripts without the acknowledgement", async () => {
+  const report = fake([{ source: "print('hi')" }], { path: "ServerStorage/RoLinkQuarantine/A_4" });
+  const s = stubSend(report);
+  await toolboxInsert({ assetId: 4 }, s.send);
+  const r = JSON.parse((await toolboxRelease({ path: report.path, target: "Workspace", enableScripts: true }, s.send)).text);
+  assert.equal(r.enabled, 1);
+});
+
+test("enabling scripts with no stored report is refused, even with the acknowledgement", async () => {
+  const s = stubSend(fake([]));
+  const r = JSON.parse((await toolboxRelease({ path: "#42", target: "Workspace", enableScripts: true, acknowledgeFlags: true }, s.send)).text);
+  assert.equal(r.refused, true);
+  assert.match(r.reason, /toolbox_insert/);
+  assert.equal(s.calls.length, 0);
+});
+
+test("the stored report does not outlive a successful release", async () => {
+  const report = fake([{ source: "print('hi')" }], { path: "ServerStorage/RoLinkQuarantine/A_5" });
+  const s = stubSend(report);
+  await toolboxInsert({ assetId: 5 }, s.send);
+  await toolboxRelease({ path: report.path, target: "Workspace" }, s.send);
+  const r = JSON.parse((await toolboxRelease({ path: report.path, target: "Workspace", enableScripts: true }, s.send)).text);
+  assert.equal(r.refused, true);
 });

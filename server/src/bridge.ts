@@ -63,6 +63,9 @@ function sameToken(a: string, b: string) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/** A page that rebinds its own domain to 127.0.0.1 still sends that domain in Host. */
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+
 const MAX_CHUNKS = 1000;
 const MAX_RESULT_BYTES = 256 * 1024 * 1024;
 
@@ -193,6 +196,8 @@ export class Bridge extends EventEmitter {
   }
 
   private async route(req: http.IncomingMessage, res: http.ServerResponse) {
+    if (!ALLOWED_HOSTS.has((req.headers.host ?? "").toLowerCase())) return sendJson(res, 403, { error: "forbidden" });
+
     // Browsers always send Origin on cross-site requests; Studio's HttpService and
     // Node's fetch do not. Refusing Origin blocks drive-by requests from web pages.
     if (req.headers.origin) return sendJson(res, 403, { error: "forbidden" });

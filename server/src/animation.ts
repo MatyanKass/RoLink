@@ -8,7 +8,7 @@
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { validateModelPath } from "./meshimport.js";
+import { readGltf, validateModelPath } from "./meshimport.js";
 import type { ToolResult } from "./core.js";
 
 export type Quat = [number, number, number, number];
@@ -213,6 +213,14 @@ export interface Clip {
   nodes: ClipNode[];
 }
 
+/** Longer than any Roblox animation is meant to be; a hostile key time cannot pin the event loop. */
+export const MAX_CLIP_SECONDS = 300;
+export const MAX_SAMPLED_FRAMES = 18_000;
+/** frames x nodes: the sampling loop is synchronous. */
+const MAX_SAMPLE_WORK = 20_000_000;
+/** Keyframes kept in memory for one clip (input plus output elements). */
+export const MAX_ANIMATION_KEYS = 4_000_000;
+
 const FBX_HELP =
   "FBX animations are not supported. In Blender use File > Export > glTF 2.0 (.glb) with Animation enabled, then import that file.";
 
@@ -222,8 +230,7 @@ export function validateAnimationPath(p: string) {
 }
 
 export async function loadClip(file: string, which?: string | number): Promise<Clip> {
-  const { NodeIO } = await import("@gltf-transform/core");
-  const doc = await new NodeIO().read(file);
+  const { doc } = await readGltf(file);
   const root = doc.getRoot();
   const anims = root.listAnimations();
   if (!anims.length) throw new Error(`no animation in ${path.basename(file)}: export from Blender with Animation enabled`);
@@ -253,6 +260,13 @@ export async function loadClip(file: string, which?: string | number): Promise<C
   nodes.forEach((n) => {
     if (n.parentIndex >= 0) n.parent = nodes[n.parentIndex].name;
   });
+
+  let keys = 0;
+  for (const ch of anim.listChannels()) {
+    const sampler = ch.getSampler();
+    keys += (sampler?.getInput()?.getCount() ?? 0) + (sampler?.getOutput()?.getCount() ?? 0);
+  }
+  if (keys > MAX_ANIMATION_KEYS) throw new Error(`animation ${JSON.stringify(names[index])} has ${keys} keyframe elements; the limit is ${MAX_ANIMATION_KEYS}`);
 
   let duration = 0;
   for (const ch of anim.listChannels()) {
@@ -398,8 +412,13 @@ export function convertClip(clip: Clip, o: ConvertOptions) {
     }
   }
 
-  const rest = globals(nodes);
+  if (!Number.isFinite(clip.duration) || clip.duration < 0) throw new Error(`animation duration ${clip.duration} is not a usable time`);
+  if (clip.duration > MAX_CLIP_SECONDS) throw new Error(`animation is too long: ${clip.duration.toFixed(1)} s; the limit is ${MAX_CLIP_SECONDS} s`);
   const count = Math.max(1, Math.ceil(clip.duration * fps - 1e-6));
+  if (count + 1 > MAX_SAMPLED_FRAMES) throw new Error(`animation needs ${count + 1} frames at ${fps} fps; the limit is ${MAX_SAMPLED_FRAMES} frames, lower fps`);
+  if ((count + 1) * nodes.length > MAX_SAMPLE_WORK) throw new Error(`animation needs ${count + 1} frames over ${nodes.length} nodes; that is too much to sample, lower fps or remove unused nodes`);
+
+  const rest = globals(nodes);
   const keyframes: Keyframe[] = [];
   for (let i = 0; i <= count; i++) {
     const t = i === count ? clip.duration : i / fps;

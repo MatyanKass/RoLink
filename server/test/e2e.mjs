@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,6 +119,19 @@ async function plugin() {
 // ---------------------------------------------------------------- run
 const c1 = await client();
 await sleep(400);
+
+// the bridge only answers requests addressed to loopback by name and port
+const rawGet = (host) => new Promise((res, rej) => {
+  http.get({ host: "127.0.0.1", port: PORT, path: "/health", headers: { Host: host } }, (x) => {
+    x.resume();
+    res(x.statusCode);
+  }).on("error", rej);
+});
+ok((await rawGet(`127.0.0.1:${PORT}`)) === 200, "Host 127.0.0.1:PORT accepted");
+ok((await rawGet(`localhost:${PORT}`)) === 200, "Host localhost:PORT accepted");
+ok((await rawGet(`evil.example:${PORT}`)) === 403, "foreign Host refused");
+ok((await rawGet("127.0.0.1")) === 403, "Host without the port refused");
+ok((await rawGet(`127.0.0.1:${PORT + 1}`)) === 403, "Host with another port refused");
 
 let r = await c1.callTool({ name: "status", arguments: {} });
 ok(text(r).includes("No Studio connected"), "status before plugin");

@@ -286,3 +286,46 @@ test("output rotations stay normalized for arbitrary animated rotations", async 
     for (const k of out.keyframes) for (const p of Object.values(k.p)) assert.ok(Math.abs(Math.hypot(...p.slice(3)) - 1) < 1e-5);
   }
 });
+
+// ---------------------------------------------------------------- hostile clips
+
+const hostileNode = (duration) => ({ name: "Hips", parentIndex: -1, t: [0, 0, 0], r: ident, s: [1, 1, 1], tracks: [{ path: "rotation", times: [0, duration], values: [ident, ident], interp: "LINEAR" }], animated: true });
+
+test("one key at t=1e7 is refused before sampling starts (PoC: anim)", () => {
+  const clip = { name: "a", clips: ["a"], duration: 1e7, nodes: [hostileNode(1e7)] };
+  const t0 = Date.now();
+  assert.throws(() => convertClip(clip, { rig: RIGS.R15, fps: 120 }), /too long/i);
+  assert.ok(Date.now() - t0 < 200, "must fail before the sampling loop");
+});
+
+test("total sampled frames are capped even when the duration alone is acceptable", () => {
+  const clip = { name: "a", clips: ["a"], duration: 200, nodes: [hostileNode(200)] };
+  assert.throws(() => convertClip(clip, { rig: RIGS.R15, fps: 120 }), /frames/i);
+  const r = convertClip({ ...clip, duration: 2, nodes: [hostileNode(2)] }, { rig: RIGS.R15, fps: 30 });
+  assert.ok(r.report.sampled > 0);
+});
+
+test("a non-finite duration is refused", () => {
+  const clip = { name: "a", clips: ["a"], duration: Infinity, nodes: [hostileNode(1)] };
+  assert.throws(() => convertClip(clip, { rig: RIGS.R15 }), /duration/i);
+});
+
+test("loadClip refuses a keyframe count that would exhaust memory", async () => {
+  const f = path.join(tmp, "keys.gltf");
+  const count = 5_000_000;
+  fs.writeFileSync(f, JSON.stringify({
+    asset: { version: "2.0" }, nodes: [{ name: "Hips" }],
+    accessors: [{ componentType: 5126, type: "SCALAR", count }, { componentType: 5126, type: "VEC4", count }],
+    animations: [{ samplers: [{ input: 0, output: 1 }], channels: [{ sampler: 0, target: { node: 0, path: "rotation" } }] }],
+  }));
+  await assert.rejects(loadClip(f), /keyframe/i);
+});
+
+test("loadClip refuses a buffer outside the model folder", async () => {
+  const dir = path.join(tmp, "uridir");
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "a.gltf");
+  fs.writeFileSync(path.join(tmp, "outside.bin"), Buffer.alloc(4));
+  fs.writeFileSync(f, JSON.stringify({ asset: { version: "2.0" }, buffers: [{ byteLength: 4, uri: "../outside.bin" }] }));
+  await assert.rejects(loadClip(f), /relative/i);
+});

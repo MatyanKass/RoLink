@@ -329,11 +329,12 @@ Afterwards review the flagged scripts and tell the user what you found before ca
 
 reg(
   "toolbox_release",
-  "Move an asset out of quarantine to `target`. Review the flagged scripts and tell the user what the report found before calling this; do not enable scripts without the user's agreement. Scripts stay disabled unless enableScripts is true, and then only those that were enabled in the original asset. One undo step.",
+  "Move an asset out of quarantine to `target`. Review the flagged scripts and tell the user what the report found before calling this; do not enable scripts without the user's agreement. Scripts stay disabled unless enableScripts is true, and then only those that were enabled in the original asset. If the report has high-severity flags, enableScripts is refused and the flags are returned: list every flag to the user first, and pass acknowledgeFlags only after the user has seen them and still wants the scripts enabled. One undo step.",
   {
     path: z.string().describe("Quarantined item: ServerStorage/RoLinkQuarantine/<name>_<id>"),
     target: z.string().describe('New parent, e.g. "Workspace"'),
     enableScripts: z.boolean().optional().describe("Default false"),
+    acknowledgeFlags: z.boolean().optional().describe("Needed with enableScripts when the report has high-severity flags, only after listing the flags to the user"),
   },
 );
 
@@ -372,7 +373,7 @@ reg(
   {
     dir: z.string().describe("Folder for the mirror (new, empty, or an earlier mirror)"),
     services: z.array(z.string()).optional().describe("Services to mirror (default: all the commonly used ones)"),
-    deleteThreshold: z.number().int().optional().describe("Refuse a batch that deletes more instances than this (default 25)"),
+    deleteThreshold: z.number().int().optional().describe("Refuse a batch that deletes more instances than this (default 25, at most 100)"),
   },
 );
 reg("mirror_stop", "Stop the file mirror. The files stay on disk.", {});

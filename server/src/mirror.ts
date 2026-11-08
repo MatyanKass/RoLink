@@ -25,6 +25,8 @@ import {
   type Rec,
   type Unit,
   diffNode,
+  dropSensitive,
+  emptyLayout,
   inJson,
   isContainer,
   layoutTree,
@@ -42,6 +44,7 @@ import {
 } from "./mirrorformat.js";
 import { encodeName, nameProblem, safeComponent } from "./mirrorname.js";
 import type { SendFn } from "./sync.js";
+import { clean } from "./toolbox.js";
 
 export const DEFAULT_SERVICES = [
   "Workspace",
@@ -69,6 +72,11 @@ const DUMP_TIMEOUT = 120_000;
 /** must outlast the watcher's awaitWriteFinish, or a folder and its files land in separate batches */
 const MIN_DISK_DEBOUNCE = 250;
 const MAX_DEFERRALS = 20;
+const DEFAULT_DELETE_THRESHOLD = 25;
+/** The rolling budget below makes a higher per-batch limit meaningless. */
+const MAX_DELETE_THRESHOLD = 100;
+const DEFAULT_DESTROY_BUDGET = 100;
+const DEFAULT_DESTROY_WINDOW_MS = 60_000;
 
 interface Wire {
   i: number;
@@ -86,6 +94,9 @@ export interface MirrorOptions {
   services?: string[];
   deleteThreshold?: number;
   debounceMs?: number;
+  /** instances disk edits may destroy within destroyWindowMs, across batches */
+  destroyBudget?: number;
+  destroyWindowMs?: number;
 }
 
 const sha = (s: string) => createHash("sha1").update(s).digest("hex");
@@ -147,11 +158,14 @@ export class MirrorSession {
   private send: SendFn;
   private threshold: number;
   private debounce: number;
+  private destroyBudget: number;
+  private destroyWindow: number;
+  private recentDestroys: { at: number; count: number }[] = [];
 
   private nodes = new Map<number, MNode>();
   private roots: MNode[] = [];
   private others: string[] = [];
-  private layout: Layout = { files: new Map(), dirs: new Map(), skipped: [] };
+  private layout: Layout = emptyLayout();
   private diskFiles = new Map<string, string>();
   private diskDirs = new Set<string>();
   private rejected = new Map<string, string>();
@@ -176,8 +190,11 @@ export class MirrorSession {
   constructor(opts: MirrorOptions, send: SendFn, placeName: string) {
     this.root = path.resolve(opts.dir);
     this.services = opts.services?.length ? opts.services : DEFAULT_SERVICES;
-    this.threshold = opts.deleteThreshold ?? 25;
+    const t = opts.deleteThreshold;
+    this.threshold = t === undefined || Number.isNaN(t) ? DEFAULT_DELETE_THRESHOLD : Math.min(MAX_DELETE_THRESHOLD, Math.max(0, Math.floor(t)));
     this.debounce = opts.debounceMs ?? 200;
+    this.destroyBudget = opts.destroyBudget ?? DEFAULT_DESTROY_BUDGET;
+    this.destroyWindow = opts.destroyWindowMs ?? DEFAULT_DESTROY_WINDOW_MS;
     this.send = send;
     this.placeName = placeName;
   }
@@ -244,7 +261,9 @@ export class MirrorSession {
     log(`[mirror] ${msg}`);
   }
 
-  private logError(msg: string) {
+  private logError(raw: string) {
+    // goes into a file agents read: nothing in it may start a new line or hide text
+    const msg = clean(raw, 2000);
     this.errors.push(`${new Date().toISOString()} ${msg}`);
     if (this.errors.length > MAX_ERROR_LINES) this.errors.splice(0, this.errors.length - MAX_ERROR_LINES);
     log(`[mirror] ${msg}`);
@@ -340,7 +359,7 @@ export class MirrorSession {
       this.updateNode(existing, w, parent ?? null);
       return;
     }
-    const n: MNode = { id: w.i, parent: parent ?? null, cls: w.c, name: w.n, props: w.props ?? {}, attrs: w.attrs, tags: w.tags, source: w.src, children: [] };
+    const n: MNode = { id: w.i, parent: parent ?? null, cls: w.c, name: w.n, props: dropSensitive(w.props) ?? {}, attrs: w.attrs, tags: w.tags, source: w.src, children: [] };
     this.nodes.set(w.i, n);
     if (parent) parent.children.push(n);
     else this.roots.push(n);
@@ -364,7 +383,7 @@ export class MirrorSession {
       changed = true;
     }
     const fields: (["props" | "attrs" | "tags" | "source", unknown])[] = [
-      ["props", w.props ?? {}],
+      ["props", dropSensitive(w.props) ?? {}],
       ["attrs", w.attrs],
       ["tags", w.tags],
       ["source", w.src],
@@ -683,7 +702,10 @@ export class MirrorSession {
         if (r.error !== undefined) {
           this.reject(rel, f.hash, r.error);
           list.delete(rel);
-        } else docs.set(rel, r.doc!);
+        } else if (r.doc.hasChildren && baseOf(rel) === "_props.json") {
+          this.reject(rel, f.hash, '"children" is not allowed in _props.json; delete files instead, or edit children in model.json');
+          list.delete(rel);
+        } else docs.set(rel, r.doc);
       }
     }
 
@@ -707,19 +729,41 @@ export class MirrorSession {
       if (u.kind === "props" || u.kind === "model" || u.kind === "init") restoreLater.push(f);
       else markDestroy(u.node);
     }
-    for (const [rel, f] of modified) {
-      const u = this.layout.files.get(rel);
-      if (!u) continue;
-      void f;
+    for (const rel of modified.keys()) {
       const doc = docs.get(rel);
-      if (doc) destroyCount += this.countRemoved(u.node, doc, u.kind !== "json");
+      if (!doc) continue;
+      let u = this.layout.files.get(rel);
+      if (!u) {
+        // an edit made together with a directory rename: the layout still has the old path
+        const m = dirMoves.find((x) => isUnder(rel, x.to));
+        if (m) u = this.layout.files.get(m.from + rel.slice(m.to.length));
+      }
+      if (u) destroyCount += this.countRemoved(u.node, doc, u.kind !== "json");
     }
+    for (const rel of added.keys()) {
+      const base = baseOf(rel);
+      const doc = docs.get(rel);
+      if (!doc?.hasChildren || (base !== "model.json" && base !== "gui.json")) continue;
+      const node = this.layout.dirs.get(dirOf(rel));
+      if (node) destroyCount += this.countRemoved(node, doc, true);
+    }
+    const refuseBatch = async (reason: string) => {
+      const restore = [...removedFiles, ...restoreLater, ...modified.keys(), ...(await this.undoMoves(dirMoves, fileMoves))];
+      return this.refuse(reason, restore, false);
+    };
     if (destroyCount > this.threshold) {
-      return this.refuse(
-        `batch would destroy ${destroyCount} instances (limit ${this.threshold}); nothing was applied. Use the delete tool for intentional bulk deletes`,
-        [...removedFiles, ...restoreLater, ...modified.keys()],
-        false,
-      );
+      return refuseBatch(`batch would destroy ${destroyCount} instances (limit ${this.threshold}); nothing was applied. Use the delete tool for intentional bulk deletes`);
+    }
+    if (destroyCount > 0) {
+      const now = Date.now();
+      this.recentDestroys = this.recentDestroys.filter((e) => now - e.at < this.destroyWindow);
+      const recent = this.recentDestroys.reduce((sum, e) => sum + e.count, 0);
+      if (recent + destroyCount > this.destroyBudget) {
+        return refuseBatch(
+          `batch would destroy ${destroyCount} instances on top of ${recent} in the last ${Math.round(this.destroyWindow / 1000)} s (limit ${this.destroyBudget}); nothing was applied. Use the delete tool for intentional bulk deletes`,
+        );
+      }
+      this.recentDestroys.push({ at: now, count: destroyCount });
     }
 
     // ---- mutate the shadow and build the ops
@@ -792,7 +836,7 @@ export class MirrorSession {
     this.nodes.set(w.i, n);
     n.name = w.n;
     n.cls = w.c;
-    n.props = w.props ?? {};
+    n.props = dropSensitive(w.props) ?? {};
     n.attrs = w.attrs;
     n.tags = w.tags;
     n.source = w.src;
@@ -800,7 +844,7 @@ export class MirrorSession {
   }
 
   private async refuse(reason: string, files: string[], rootGone: boolean) {
-    this.refusals.push({ time: new Date().toISOString(), reason });
+    this.refusals.push({ time: new Date().toISOString(), reason: clean(reason, 2000) });
     this.logError(`REFUSED: ${reason}`);
     // disk is restored from the shadow so it keeps matching Studio
     for (const f of files) this.diskFiles.delete(f);
@@ -814,6 +858,30 @@ export class MirrorSession {
     }
     for (const d of [...this.diskDirs]) if (!fs.existsSync(this.abs(d))) this.diskDirs.delete(d);
     await this.render();
+  }
+
+  /** A refused batch must not keep its renames: put them back. Returns the files to restore from the shadow. */
+  private async undoMoves(dirMoves: { from: string; to: string }[], fileMoves: { from: string; to: string }[]): Promise<string[]> {
+    const restore: string[] = [];
+    const undo = async (from: string, to: string) => {
+      try {
+        await fsp.rename(this.abs(to), this.abs(from));
+      } catch (e: any) {
+        this.logError(`could not move ${to} back to ${from}: ${e.message}`);
+      }
+    };
+    for (const m of dirMoves) {
+      for (const k of [...this.diskFiles.keys()]) if (isUnder(k, m.to)) this.diskFiles.delete(k);
+      for (const d of [...this.diskDirs]) if (d === m.to || isUnder(d, m.to)) this.diskDirs.delete(d);
+      restore.push(...this.filesUnder(m.from, this.diskFiles.keys()).map((f) => `${m.from}/${f}`));
+      await undo(m.from, m.to);
+    }
+    for (const m of fileMoves) {
+      this.diskFiles.delete(m.to);
+      restore.push(m.from);
+      await undo(m.from, m.to);
+    }
+    return restore;
   }
 
   private countRemoved(n: MNode, doc: DocNode, inModel: boolean): number {
@@ -892,11 +960,13 @@ export class MirrorSession {
     const parent = this.layout.dirs.get(dirOf(rel));
     if (!parent) return null;
     if (!owner?.length) return parent;
-    return modelChildByTokens(parent, owner);
+    return modelChildByTokens(parent, owner, this.layout.ownerAliases);
   }
 
-  private applyMove(node: MNode, name: string, parent: MNode | null, rel: string, plan: Plan) {
-    const problem = nameProblem(name);
+  private applyMove(node: MNode, entryName: string, parent: MNode | null, rel: string, plan: Plan) {
+    // a shortened file name stands for the instance's real name
+    const name = this.layout.longNames.get(entryName.toLowerCase()) ?? entryName;
+    const problem = name === node.name ? null : nameProblem(name);
     if (problem) return this.reject(rel, undefined, problem);
     if (!parent) return this.reject(rel, undefined, "its new location does not exist in the place");
     if (inside(parent, node)) return this.reject(rel, undefined, "cannot move an instance into itself");
@@ -1011,7 +1081,7 @@ export class MirrorSession {
     if (this.isModelDir(dirOf(rel))) {
       const e = parseModelFile(base);
       if (!e || e.kind === "model") return this.reject(rel, f.hash, "not a valid file name inside a model (see AGENTS.md)");
-      const owner = modelChildByTokens(parent, e.owner);
+      const owner = modelChildByTokens(parent, e.owner, this.layout.ownerAliases);
       if (!owner) return this.reject(rel, f.hash, `owner "${e.owner.join("+")}" not found in the model`);
       if (e.kind === "script") this.createNode(owner, e.cls, e.name, undefined, f.text, rel, plan);
       else if (doc) this.createNode(owner, e.cls, doc.name ?? e.cls, doc, undefined, rel, plan);

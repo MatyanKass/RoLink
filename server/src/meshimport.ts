@@ -38,6 +38,17 @@ export const MAX_TRIS_PER_CHUNK = 18_000;
 export const MAX_VERTS_PER_CHUNK = 50_000;
 export const MAX_TOTAL_TRIS = 1_000_000;
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+/** Vertices a model can expand to: every triangle with its own three corners. */
+export const MAX_TOTAL_VERTS = MAX_TOTAL_TRIS * 3;
+/** Accessor elements in one glTF file: the vertex limit times position, normal, uv and tangent. */
+export const MAX_ACCESSOR_ELEMENTS = MAX_TOTAL_VERTS * 4;
+/** Bytes those accessors may decode to. */
+export const MAX_ACCESSOR_BYTES = 256 * 1024 * 1024;
+/** glTF objects (nodes, primitives, materials, ...); each one is a heavy object once parsed. */
+export const MAX_GLTF_OBJECTS = 200_000;
+/** Bytes of files a model may pull in through uris or mtllib, counted per reference. */
+export const MAX_REFERENCED_BYTES = 200 * 1024 * 1024;
+const MAX_OBJ_LINE = 64 * 1024;
 export const PREVIEW_EXTS = [".obj", ".stl", ".gltf", ".glb"];
 export const UPLOAD_EXTS = [".fbx", ".gltf", ".glb", ".obj"];
 
@@ -52,6 +63,54 @@ export function validateModelPath(p: string, exts: string[]): { file: string; ex
   if (st.size > MAX_FILE_BYTES) throw new Error(`file is ${(st.size / 1048576).toFixed(1)} MB; limit is ${MAX_FILE_BYTES / 1048576} MB`);
   if (st.size === 0) throw new Error(`file is empty: ${file}`);
   return { file, ext, bytes: st.size };
+}
+
+// ------------------------------------------------------------------ referenced files
+
+/** A model refused for its size or its references; never a parse problem of the file format. */
+class RefusedModel extends Error {}
+
+const DEVICE_NAME = /^(con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3]|conin\$|conout\$)(\s*\.|\s*$)/i;
+
+function badRef(what: string, ref: string, why: string): Error {
+  return new RefusedModel(`${what} "${ref.slice(0, 200)}" refused: ${why}; only relative files in the model's folder or its subfolders are allowed`);
+}
+
+/** The path `ref` names inside the model's folder, or a thrown error. Touches no files. */
+function refPath(ref: string, modelDir: string, what: string): string {
+  if (!ref) throw badRef(what, ref, "empty path");
+  if (/[\x00-\x1f]/.test(ref)) throw badRef(what, ref, "control characters");
+  if (ref.includes(":")) throw badRef(what, ref, "absolute paths, drive letters, streams and URL schemes are not relative");
+  if (/^[/\\]/.test(ref)) throw badRef(what, ref, "absolute, UNC and device paths are not relative");
+  const segments = ref.split(/[/\\]+/).filter((x) => x !== "" && x !== ".");
+  if (segments.length === 0) throw badRef(what, ref, "no file name");
+  for (const seg of segments) {
+    if (seg === "..") throw badRef(what, ref, "it climbs out of the folder");
+    if (/[. ]$/.test(seg)) throw badRef(what, ref, "Windows would strip the trailing dot or space");
+    if (DEVICE_NAME.test(seg)) throw badRef(what, ref, "it names a device");
+  }
+  return path.join(modelDir, ...segments);
+}
+
+/** Real location of a file inside the folder; undefined when it does not exist. Links may not lead out. */
+function contained(target: string, modelDir: string, what: string, ref: string): { real: string; bytes: number } | undefined {
+  let real: string;
+  try {
+    real = fs.realpathSync(target);
+  } catch {
+    return undefined;
+  }
+  const rel = path.relative(fs.realpathSync(modelDir), real);
+  if (rel === "" || rel.split(path.sep)[0] === ".." || path.isAbsolute(rel)) throw badRef(what, ref, "it is a link leading outside the folder");
+  const st = fs.statSync(real);
+  if (!st.isFile()) throw badRef(what, ref, "not a regular file");
+  return { real, bytes: st.size };
+}
+
+function addReferenced(total: number, bytes: number): number {
+  const sum = total + bytes;
+  if (sum > MAX_REFERENCED_BYTES) throw new RefusedModel(`referenced files total ${(sum / 1048576).toFixed(1)} MB; the limit is ${MAX_REFERENCED_BYTES / 1048576} MB`);
+  return sum;
 }
 
 // ------------------------------------------------------------------ OBJ
@@ -70,6 +129,36 @@ export function parseMtl(text: string): Map<string, { color?: [number, number, n
     else if (k === "Tr") cur.transparency = +rest[0];
   }
   return out;
+}
+
+/** Lines of an OBJ, one at a time, so a parser that gives up early never materialises the rest. */
+function* textLines(text: string): Generator<string> {
+  let pos = 0;
+  while (pos < text.length) {
+    let end = text.indexOf("\n", pos);
+    if (end < 0) end = text.length;
+    let stop = end;
+    if (stop > pos && text[stop - 1] === "\r") stop--;
+    if (stop - pos > MAX_OBJ_LINE && text[pos] !== "#") throw new Error(`OBJ: a line is longer than ${MAX_OBJ_LINE} characters`);
+    yield text.slice(pos, stop);
+    pos = end + 1;
+  }
+}
+
+/** Paths of every mtllib, each checked against the folder rule; nothing is opened. */
+function objMaterialLibs(text: string, modelFile: string): { lib: string; target: string }[] {
+  const dir = path.dirname(modelFile);
+  const out: { lib: string; target: string }[] = [];
+  for (const raw of textLines(text)) {
+    const m = /^\s*mtllib\s+(.+)$/.exec(raw);
+    if (m) out.push({ lib: m[1].trim(), target: refPath(m[1].trim(), dir, "OBJ mtllib") });
+  }
+  return out;
+}
+
+/** Throws if the OBJ names a material file outside its folder. Used by upload mode. */
+export function checkObjReferences(text: string, modelFile: string): void {
+  objMaterialLibs(text, modelFile);
 }
 
 export function parseObj(text: string, mtl?: Map<string, { color?: [number, number, number]; transparency?: number }>): MeshGroup[] {
@@ -97,7 +186,8 @@ export function parseObj(text: string, mtl?: Map<string, { color?: [number, numb
     return n < 0 ? len + n : n - 1;
   };
 
-  for (const raw of text.split(/\r?\n/)) {
+  let triangles = 0;
+  for (const raw of textLines(text)) {
     const line = raw.trim();
     if (!line || line[0] === "#") continue;
     const parts = line.split(/\s+/);
@@ -112,6 +202,8 @@ export function parseObj(text: string, mtl?: Map<string, { color?: [number, numb
       material = parts.slice(1).join(" ");
       cur = undefined;
     } else if (k === "f") {
+      triangles += Math.max(0, parts.length - 3);
+      if (triangles > MAX_TOTAL_TRIS) throw new Error(`OBJ: more than ${MAX_TOTAL_TRIS} triangles; preview limit is ${MAX_TOTAL_TRIS} (decimate it, or use upload mode)`);
       cur ??= group();
       const g = cur;
       const corner: number[] = [];
@@ -210,18 +302,108 @@ export function parseStl(buf: Buffer): MeshGroup[] {
 
 // ------------------------------------------------------------------ glTF
 
-export async function parseGltf(file: string): Promise<MeshGroup[]> {
-  const { NodeIO } = await import("@gltf-transform/core");
+const ELEMENT_SIZE: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT4: 16 };
+const COMPONENT_BYTES: Record<number, number> = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 };
+
+function len(v: unknown): number {
+  return Array.isArray(v) ? v.length : 0;
+}
+
+/** Refuses a glTF whose declared size would exhaust memory; only reads its JSON. */
+function preflightGltf(json: any): void {
+  if (!json || typeof json !== "object") throw new Error("glTF: the JSON is not an object");
+  let elements = 0;
+  let bytes = 0;
+  for (const a of Array.isArray(json.accessors) ? json.accessors : []) {
+    const count = a?.count;
+    if (!Number.isSafeInteger(count) || count < 0) throw new RefusedModel(`glTF: accessor count ${count} is not a whole number`);
+    elements += count + (a?.sparse?.count ?? 0);
+    bytes += count * (ELEMENT_SIZE[a.type] ?? 1) * (COMPONENT_BYTES[a.componentType] ?? 8);
+    if (elements > MAX_ACCESSOR_ELEMENTS) throw new RefusedModel(`glTF: accessors declare more than ${MAX_ACCESSOR_ELEMENTS} elements; the limit is ${MAX_ACCESSOR_ELEMENTS} per file`);
+    if (bytes > MAX_ACCESSOR_BYTES) throw new RefusedModel(`glTF: accessors declare more than ${MAX_ACCESSOR_BYTES / 1048576} MB of data; the limit is ${MAX_ACCESSOR_BYTES / 1048576} MB per file`);
+  }
+  let objects = 0;
+  for (const k of ["accessors", "animations", "bufferViews", "buffers", "cameras", "images", "materials", "meshes", "nodes", "samplers", "scenes", "skins", "textures"]) objects += len(json[k]);
+  for (const m of Array.isArray(json.meshes) ? json.meshes : []) {
+    objects += len(m?.primitives);
+    for (const p of Array.isArray(m?.primitives) ? m.primitives : []) objects += Object.keys(p?.attributes ?? {}).length + len(p?.targets);
+  }
+  for (const a of Array.isArray(json.animations) ? json.animations : []) objects += len(a?.channels) + len(a?.samplers);
+  for (const s of Array.isArray(json.skins) ? json.skins : []) objects += len(s?.joints);
+  if (objects > MAX_GLTF_OBJECTS) throw new RefusedModel(`glTF: more than ${MAX_GLTF_OBJECTS} objects; the limit is ${MAX_GLTF_OBJECTS} per file`);
+}
+
+/** Splits a .glb into its JSON and binary chunk, staying inside the file. */
+function parseGlb(buf: Buffer, glbBufferKey: string): { json: any; resources: Record<string, Uint8Array<ArrayBuffer>> } {
+  if (buf.length < 20 || buf.readUInt32LE(0) !== 0x46546c67 || buf.readUInt32LE(4) !== 2) throw new Error("glTF: not a version 2 binary file");
+  const jsonLength = buf.readUInt32LE(12);
+  if (buf.readUInt32LE(16) !== 0x4e4f534a || 20 + jsonLength > buf.length) throw new Error("glTF: damaged JSON chunk");
+  const json = JSON.parse(buf.toString("utf8", 20, 20 + jsonLength));
+  const resources: Record<string, Uint8Array<ArrayBuffer>> = Object.create(null);
+  const binAt = 20 + jsonLength;
+  if (buf.length >= binAt + 8 && buf.readUInt32LE(binAt + 4) === 0x004e4942) {
+    const binLength = buf.readUInt32LE(binAt);
+    if (binAt + 8 + binLength > buf.length) throw new Error("glTF: damaged binary chunk");
+    resources[glbBufferKey] = new Uint8Array(buf.buffer as ArrayBuffer, buf.byteOffset + binAt + 8, binLength);
+  }
+  return { json, resources };
+}
+
+/**
+ * Reads a .gltf/.glb without ever letting the file choose what gets opened: its declared size is
+ * checked and every uri is validated before a single referenced file is read.
+ */
+export async function readGltf(file: string) {
+  const { NodeIO, GLB_BUFFER } = await import("@gltf-transform/core");
   const io = new NodeIO();
+  const st = await fsp.stat(file);
+  if (st.size > MAX_FILE_BYTES) throw new Error(`file is ${(st.size / 1048576).toFixed(1)} MB; limit is ${MAX_FILE_BYTES / 1048576} MB`);
+  const buf = await fsp.readFile(file);
+  const isGlb = buf.length >= 4 && buf.readUInt32LE(0) === 0x46546c67;
+  const parsed = isGlb ? parseGlb(buf, GLB_BUFFER) : { json: JSON.parse(buf.toString("utf8")), resources: Object.create(null) as Record<string, Uint8Array<ArrayBuffer>> };
+  const { json, resources } = parsed;
+  preflightGltf(json);
+
+  const dir = path.dirname(file);
+  const uris: string[] = [];
+  for (const list of [json.images, json.buffers]) for (const r of Array.isArray(list) ? list : []) if (typeof r?.uri === "string" && !/^data:/i.test(r.uri)) uris.push(r.uri);
+
+  const plan: { uri: string; real: string }[] = [];
+  let total = 0;
+  for (const uri of uris) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(uri);
+    } catch {
+      throw badRef("glTF uri", uri, "malformed percent escape");
+    }
+    const target = refPath(decoded, dir, "glTF uri");
+    const found = contained(target, dir, "glTF uri", uri);
+    if (!found) throw new Error(`glTF: referenced file not found: ${uri}`);
+    total = addReferenced(total, found.bytes);
+    plan.push({ uri, real: found.real });
+  }
+  const read = new Map<string, Uint8Array<ArrayBuffer>>();
+  for (const { uri, real } of plan) {
+    if (!read.has(real)) read.set(real, new Uint8Array(await fsp.readFile(real)));
+    resources[uri] = read.get(real)!;
+  }
+  return { doc: await io.readJSON({ json, resources }), io };
+}
+
+export async function parseGltf(file: string): Promise<MeshGroup[]> {
   let doc;
   try {
-    doc = await io.read(file);
+    doc = (await readGltf(file)).doc;
   } catch (e: any) {
+    if (e instanceof RefusedModel) throw e;
     throw new Error(`glTF: ${e?.message ?? e} (Draco/meshopt-compressed files are not supported in preview mode)`);
   }
   const root = doc.getRoot();
   const scene = root.getDefaultScene() ?? root.listScenes()[0];
   const out: MeshGroup[] = [];
+  let totalVerts = 0;
+  let totalTris = 0;
   const visit = (node: any) => {
     const mesh = node.getMesh();
     if (mesh) {
@@ -234,6 +416,12 @@ export async function parseGltf(file: string): Promise<MeshGroup[]> {
         const nrm = prim.getAttribute("NORMAL");
         const uv = prim.getAttribute("TEXCOORD_0");
         const count = pos.getCount();
+        // nodes can share a mesh, so this is the size after instancing, not the size of the file
+        totalVerts += count;
+        totalTris += (prim.getIndices()?.getCount() ?? count) / 3;
+        if (totalVerts > MAX_TOTAL_VERTS || totalTris > MAX_TOTAL_TRIS) {
+          throw new Error(`glTF: model expands to more than ${MAX_TOTAL_TRIS} triangles or ${MAX_TOTAL_VERTS} vertices; that is the preview limit (decimate it, or use upload mode)`);
+        }
         const positions: number[] = [];
         const normals: number[] | undefined = nrm ? [] : undefined;
         const uvs: number[] | undefined = uv ? [] : undefined;
@@ -302,12 +490,19 @@ export async function loadModel(file: string, ext: string): Promise<MeshGroup[]>
   if (ext === ".obj") {
     const text = await fsp.readFile(file, "utf8");
     let mtl: ReturnType<typeof parseMtl> | undefined;
-    for (const m of text.matchAll(/^\s*mtllib\s+(.+?)\s*$/gm)) {
-      const p = path.resolve(path.dirname(file), m[1]);
-      if (fs.existsSync(p)) {
-        mtl ??= new Map();
-        for (const [k, val] of parseMtl(await fsp.readFile(p, "utf8"))) mtl.set(k, val);
-      }
+    const dir = path.dirname(file);
+    const libs = objMaterialLibs(text, file);
+    const found: string[] = [];
+    let total = 0;
+    for (const { lib, target } of libs) {
+      const hit = contained(target, dir, "OBJ mtllib", lib);
+      if (!hit) continue; // a missing material library only costs the colors
+      total = addReferenced(total, hit.bytes);
+      found.push(hit.real);
+    }
+    for (const real of found) {
+      mtl ??= new Map();
+      for (const [k, val] of parseMtl(await fsp.readFile(real, "utf8"))) mtl.set(k, val);
     }
     return parseObj(text, mtl);
   }

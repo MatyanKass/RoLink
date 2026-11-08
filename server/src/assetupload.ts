@@ -6,6 +6,7 @@
 
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { checkObjReferences, readGltf } from "./meshimport.js";
 
 const API = "https://apis.roblox.com/assets/v1";
 
@@ -38,12 +39,12 @@ function scrub(s: string, cfg: UploadConfig) {
 async function readFileForUpload(file: string, ext: string): Promise<{ data: Uint8Array; ext: string }> {
   if (ext === ".gltf") {
     // a .gltf usually references external .bin/.png files: pack into one .glb
-    const { NodeIO } = await import("@gltf-transform/core");
-    const io = new NodeIO();
-    const doc = await io.read(file);
+    const { doc, io } = await readGltf(file);
     return { data: await io.writeBinary(doc), ext: ".glb" };
   }
-  return { data: await fsp.readFile(file), ext };
+  const data = await fsp.readFile(file);
+  if (ext === ".obj") checkObjReferences(data.toString("utf8"), file);
+  return { data, ext };
 }
 
 export async function uploadModel(
