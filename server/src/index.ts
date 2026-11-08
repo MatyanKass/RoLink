@@ -58,16 +58,26 @@ async function callTool(tool: string, args: Record<string, unknown>): Promise<To
   }
 }
 
-const GUIDE_FILE = path.resolve(SERVER_DIR, "..", "docs", "BUILD_FORMAT.md");
+const GUIDE_FILES = ["BUILD_FORMAT.md", "PLAYTEST.md"].map((f) => path.resolve(SERVER_DIR, "..", "docs", f));
 
-const INSTRUCTIONS = `RoLink drives a live Roblox Studio (edit mode) — changes appear instantly, no play/restart needed, and every write is one undo step (Ctrl+Z in Studio or the undo tool).
+const INSTRUCTIONS = `RoLink drives a live Roblox Studio — changes appear instantly in edit mode, every write is one undo step (Ctrl+Z in Studio or the undo tool) — and it can run the game and test it for you.
 
 Paths: "Workspace/Map/Tower", "Workspace/Wall[2]" (2nd same-named child), "#42" (id from earlier results), "@selection".
 
-Workflow for quality builds: look first (status → tree → screenshot), build in small named batches with the build tool (JSON, local coordinates), then VERIFY with screenshot (views: iso/front/top…) and fix. Call the guide tool once before your first build — it documents the node format (at/rot/size/color/material, repeat, mirror, span, csg, refs).
+Workflow for quality builds: look first (status → tree → screenshot), build in small named batches with the build tool (JSON, local coordinates), then VERIFY with screenshot (views: iso/front/top…) and fix. Call the guide tool once before your first build — it documents the node format (at/rot/size/color/material, repeat, mirror, span, csg, refs) and the test helpers.
 Scale: character ≈5 studs tall, door 4×7, floor-to-ceiling 10–14, walkway ≥6. Snap to 0.25/0.5 studs. Name everything.
 To look at and edit the place, prefer the file mirror: mirror_start {dir}, then use your normal file tools (read, edit, write, delete) on that folder; it explains itself in AGENTS.md.
-Code: use sync_start on a project folder (Rojo-style *.project.json) — files are pushed to Studio on save, Studio edits come back to files. Use run for one-off Luau in Studio (edit mode).`;
+Code: use sync_start on a project folder (Rojo-style *.project.json) — files are pushed to Studio on save, Studio edits come back to files. Use run for one-off Luau in Studio (edit mode).
+
+Testing: you can and should test gameplay yourself by script, the way you run code on a normal computer — don't ask the user to click through the game. Loop: playtest_start → playtest_scenario (teleport the player, wait, check values, print to Output) → output_read (errors with stack traces) → playtest_stop → fix the code → re-run. Each test is a normal visible Studio Play or Run session; scenarios run server-side by default.
+Example scenario:
+T.step("door opens at the button", function()
+  T.teleport(workspace.Button.Position + Vector3.new(0, 4, 0))
+  T.waitFor(function() return workspace.Door.Open.Value end, 5, "door to open")
+  T.equal(workspace.Door.Transparency, 1, "door hidden")
+  T.log("door ok, gold =", T.player():GetAttribute("Gold"))
+end)
+playtest_scenario returns per-step pass/fail, messages, timings, logs and errors; a failing step does not stop the others. Poll output_read with since=<next> for new lines only.`;
 
 const server = new McpServer({ name: "rolink", version: VERSION }, { instructions: INSTRUCTIONS });
 
@@ -96,8 +106,10 @@ function reg(name: string, description: string, shape: Record<string, z.ZodTypeA
 
 server.registerTool(
   "guide",
-  { description: "RoLink build-spec format and modelling rules. Read once before building.", annotations: { readOnlyHint: true } },
-  async () => ({ content: [{ type: "text", text: fs.existsSync(GUIDE_FILE) ? fs.readFileSync(GUIDE_FILE, "utf8") : "guide missing" }] }),
+  { description: "RoLink guide: build-spec format and modelling rules, plus how to test by script in a play-test (T helpers, the test loop). Read once before building or testing.", annotations: { readOnlyHint: true } },
+  async () => ({
+    content: [{ type: "text", text: GUIDE_FILES.map((f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : `(missing ${path.basename(f)})`)).join("\n\n---\n\n") }],
+  }),
 );
 
 reg("status", "Connected Studio sessions and sync state.", {}, true);
@@ -316,6 +328,44 @@ reg(
 );
 reg("mirror_stop", "Stop the file mirror. The files stay on disk.", {});
 reg("mirror_status", "Mirror state: folder, counts, refused deletes, rejected files, recent errors.", {}, true);
+
+reg(
+  "playtest_start",
+  `Start a normal, visible Studio test: mode "play" = Play Solo with your character (server + client contexts), mode "run" = Run without a player (server context only). Waits until the test's plugin contexts have connected.
+Refused while another test is running. Your edit-mode place is kept and comes back when the test stops, but everything that changes INSIDE the test (moved parts, spawned objects, data set by scripts) is discarded at stop; unsaved edit-mode work is NOT saved to disk by this tool, so ask the user to save first if it matters.
+If Studio refuses, the error says to ask the user to press Play; playtest_status then detects that test.`,
+  {
+    mode: z.enum(["play", "run"]).describe('"play" (with a player) or "run" (no player)'),
+    timeout: z.number().optional().describe("Seconds to wait for the test to connect, default 60"),
+  },
+);
+
+reg("playtest_stop", "End the running play-test (play-test changes are discarded, as at Studio's Stop button) and wait until Studio is back in edit mode. No-op if no test runs.", {});
+
+reg("playtest_status", "Whether a play-test is running (also one the user started with Play/Run), its mode, which contexts are connected, and the players in it.", {}, true);
+
+reg(
+  "playtest_scenario",
+  `Run a Luau test script inside the running play-test, server context by default ("client" also works). Returns a report: per-step pass/fail, message, duration, logs and errors captured during the run. A failing step does not stop the others; an exceeded timeout cancels the code.
+Helpers in the table T: T.player(), T.character(), T.teleport(cframeOrVector), T.wait(s), T.waitFor(predicate, timeout?, label?), T.assert(cond, msg), T.equal(actual, expected, msg), T.step(name, fn), T.log(...), T.set(key, value) / T.get(key) (values last for this play-test context, across steps and scenarios). print/warn work too. See the guide tool for an example.`,
+  {
+    source: z.string().describe("Luau code. `T` and `args` are in scope"),
+    args: z.any().optional().describe("Value exposed to the scenario as `args`"),
+    timeout: z.number().optional().describe("Seconds, default 60 (max 600); the scenario is cancelled after that"),
+  },
+);
+
+reg(
+  "output_read",
+  "Read Studio's Output (print, warn, errors with stack traces) of one context; defaults to the running test's server, else edit. Each context keeps a bounded log with increasing seq numbers: pass the returned `next` as `since` to get only new lines. Start with level:\"error\" after a test run.",
+  {
+    since: z.number().optional().describe("Only entries after this seq (the `next` of the last read)"),
+    level: z.union([z.enum(["output", "info", "warning", "error"]), z.array(z.string())]).optional().describe("Only these level(s)"),
+    limit: z.number().int().optional().describe("Max entries, default 200 (without since: the newest ones)"),
+    contains: z.string().optional().describe("Case-insensitive substring filter"),
+  },
+  true,
+);
 
 async function main() {
   if (process.argv.includes("--daemon")) {

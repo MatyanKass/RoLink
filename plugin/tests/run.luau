@@ -437,4 +437,8 @@ do
 	holder:Destroy()
 end
 
+local luauLib = require("@lune/luau")
+local fsLib = require("@lune/fs")
+luauLib.load(fsLib.readFile("playtest.luau"), { debugName = "playtest" })(H)
+
 H.done()
