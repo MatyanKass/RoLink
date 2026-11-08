@@ -5,14 +5,14 @@ import { KEY, RU_AUDIO, RU_IMAGE, doneOp, json, setup, wav } from "./helpers.mjs
 
 const prep = (ctx) => ctx.prepare({ path: ctx.audio(), kind: "audio", name: "T" });
 
-test("audio quota: reason, limit and manual-upload hint", async (t) => {
+test("audio quota: the reason Roblox gave, no fixed number, manual-upload hint", async (t) => {
   const ctx = await setup(t);
   ctx.cloud.createResponse = () => json(429, { message: "You have reached your monthly audio upload quota" });
   const r = await prep(ctx);
   await assert.rejects(ctx.publish({ prepareId: r.prepareId, confirmation: RU_AUDIO }), (e) => {
-    assert.match(e.message, /quota/i);
-    assert.match(e.message, /100/);
-    assert.match(e.message, /10\b/);
+    assert.match(e.message, /You have reached your monthly audio upload quota/);
+    assert.match(e.message, /depends on your Roblox account/);
+    assert.doesNotMatch(e.message, /\b(?:10|100|2,?000) (?:uploads? )?(?:per|a) month/i);
     assert.match(e.message, /yourself|manually/i);
     return true;
   });

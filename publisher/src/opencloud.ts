@@ -33,7 +33,7 @@ const QUOTA_WORDS = /quota|monthly|upload limit|limit (?:was |has been )?(?:reac
 const MANUAL = "If it keeps failing you may need to upload it yourself in Creator Hub or the Studio Asset Manager.";
 
 function quotaLimit(ctx: CloudContext): string {
-  if (ctx === "audio") return "Limit: audio uploads are capped at 100 per month for ID-verified accounts and 10 per month otherwise; the period does not always reset on the 1st.";
+  if (ctx === "audio") return "Limit: the audio upload allowance depends on your Roblox account; the reason above is the one Roblox returned.";
   return "Limit: Roblox does not publish a fixed count for this asset type.";
 }
 

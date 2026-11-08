@@ -128,10 +128,10 @@ Checked locally before anything is uploaded, from the [Assets usage guide](https
 
 | | Formats | Limits |
 | --- | --- | --- |
-| Audio | `.mp3` `.ogg` `.wav` `.flac` | 20 MB, 7 minutes, 100 uploads a month if ID-verified, otherwise 10 |
+| Audio | `.mp3` `.ogg` `.wav` `.flac` | 20 MB, 7 minutes; the upload allowance depends on the account (see below) |
 | Image | `.png` `.jpeg` `.bmp` `.tga` | 20 MB, smaller than 8000x8000 |
 
-Names are limited to 50 characters and descriptions to 1000. When Roblox refuses for quota or rate-limit reasons, the error gives the reason and the limit, and says you may need to upload the file yourself in Creator Hub or the Studio Asset Manager. This server never drives a browser.
+Names are limited to 50 characters and descriptions to 1000. The audio upload allowance depends on the Roblox account, and Roblox's own documentation gives conflicting numbers, so this server does not check or state one: when an upload is over the allowance, the error Roblox returns is what you see. When Roblox refuses for quota or rate-limit reasons, the error shows Roblox's reason and says you may need to upload the file yourself in Creator Hub or the Studio Asset Manager. This server never drives a browser.
 
 ## Getting a place file
 
