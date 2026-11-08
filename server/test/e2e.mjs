@@ -226,5 +226,6 @@ stop = true;
 await c2.close();
 await c1.close();
 fs.rmSync(proj, { recursive: true, force: true });
-console.log(`e2e: ${passed} checks passed`);
+const playtestChecks = await (await import("./playtest-e2e.mjs")).default();
+console.log(`e2e: ${passed} checks passed, playtest: ${playtestChecks}`);
 process.exit(0);

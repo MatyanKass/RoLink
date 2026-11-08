@@ -10,6 +10,7 @@ local Build = require(script.Parent.Build)
 local Codec = require(script.Parent.Codec)
 local MeshImport = require(script.Parent.MeshImport)
 local Paths = require(script.Parent.Paths)
+local Playtest = require(script.Parent.Playtest)
 local Serialize = require(script.Parent.Serialize)
 local Sync = require(script.Parent.Sync)
 local Util = require(script.Parent.Util)
@@ -22,10 +23,15 @@ Ops.mutating = {
 	terrain = true, import_rbxm = true, sync = true, mesh_build = true, insert_asset = true,
 }
 
+-- ops that only observe or stop a test: Main runs them off the worker queue so a
+-- long scenario can't block them
+Ops.immediate = { ping = true, output_read = true, playtest_status = true, playtest_end = true, playtest_request_stop = true }
+
 local pluginRef -- set by Main
 
 function Ops.init(plugin)
 	pluginRef = plugin
+	Playtest.init(plugin)
 end
 
 local function v3(v)
@@ -780,6 +786,27 @@ end
 
 function Ops.sync(args)
 	return Sync.apply(args)
+end
+
+-- ------------------------------------------------------------------ play-test
+
+Ops.playtest_start = function(args)
+	return Playtest.start(args)
+end
+Ops.playtest_status = function(args)
+	return Playtest.status(args)
+end
+Ops.playtest_end = function(args)
+	return Playtest.endTest(args)
+end
+Ops.playtest_request_stop = function(args)
+	return Playtest.requestStop(args)
+end
+Ops.playtest_scenario = function(args)
+	return Playtest.scenario(args)
+end
+Ops.output_read = function(args)
+	return Playtest.readOutput(args)
 end
 
 -- ------------------------------------------------------------------ dispatch

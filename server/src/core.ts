@@ -12,6 +12,7 @@ import { Project, SyncSession, findProjectFile } from "./sync.js";
 import { randomUUID } from "node:crypto";
 import { PREVIEW_EXTS, UPLOAD_EXTS, loadModel, prepareChunks, validateModelPath } from "./meshimport.js";
 import { uploadConfig, uploadModel } from "./assetupload.js";
+import { Playtests } from "./playtest.js";
 
 export interface ImageOut {
   data: string; // base64
@@ -29,9 +30,11 @@ export class Core {
   readonly bridge: Bridge;
   private sync?: SyncSession;
   private shotLock = Promise.resolve();
+  private readonly playtests: Playtests;
 
   constructor(bridge: Bridge) {
     this.bridge = bridge;
+    this.playtests = new Playtests(bridge);
     bridge.apiProvider = () => getApi();
     bridge.on("plugin-event", (s: SessionInfo, ev: any) => {
       if (this.sync && s.context === "edit" && (ev.type === "source" || ev.type === "created")) {
@@ -112,6 +115,16 @@ export class Core {
         return this.syncStop();
       case "sync_status":
         return json(this.sync ? this.sync.status() : { active: false });
+      case "playtest_start":
+        return json(await this.playtests.start(args));
+      case "playtest_stop":
+        return json(await this.playtests.stop(args));
+      case "playtest_status":
+        return json(await this.playtests.status(args));
+      case "playtest_scenario":
+        return json(await this.playtests.scenario(args));
+      case "output_read":
+        return json(await this.playtests.outputRead(args));
     }
     throw new Error(`unknown tool ${tool}`);
   }

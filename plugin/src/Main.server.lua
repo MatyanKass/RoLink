@@ -121,6 +121,21 @@ end
 local queue = {}
 local workerBusy = false
 
+local function execute(cmd)
+	local t0 = os.clock()
+	local ok, res = pcall(Ops.dispatch, cmd.op, cmd.args)
+	local ms = math.floor((os.clock() - t0) * 1000)
+	if ok then
+		log(string.format("%s  ✓ %dms", cmd.op, ms))
+	else
+		log(string.format("%s  ✗ %s", cmd.op, tostring(res)))
+	end
+	local okPost, postErr = pcall(postResult, cmd.id, ok, res)
+	if not okPost then
+		log("could not send result: " .. tostring(postErr))
+	end
+end
+
 local function runWorker()
 	if workerBusy then
 		return
@@ -129,19 +144,7 @@ local function runWorker()
 	task.spawn(function()
 		local okLoop, loopErr = pcall(function()
 			while #queue > 0 do
-				local cmd = table.remove(queue, 1)
-				local t0 = os.clock()
-				local ok, res = pcall(Ops.dispatch, cmd.op, cmd.args)
-				local ms = math.floor((os.clock() - t0) * 1000)
-				if ok then
-					log(string.format("%s  ✓ %dms", cmd.op, ms))
-				else
-					log(string.format("%s  ✗ %s", cmd.op, tostring(res)))
-				end
-				local okPost, postErr = pcall(postResult, cmd.id, ok, res)
-				if not okPost then
-					log("could not send result: " .. tostring(postErr))
-				end
+				execute(table.remove(queue, 1))
 			end
 		end)
 		workerBusy = false
@@ -207,7 +210,11 @@ local function connectLoop()
 			end
 			if status == 200 and data then
 				for _, cmd in data.commands or {} do
-					table.insert(queue, cmd)
+					if Ops.immediate[cmd.op] then
+						task.spawn(execute, cmd)
+					else
+						table.insert(queue, cmd)
+					end
 				end
 				if #queue > 0 then
 					runWorker()
