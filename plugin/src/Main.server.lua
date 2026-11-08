@@ -211,7 +211,7 @@ local function connectLoop()
 			end
 			if status == 200 and data then
 				for _, cmd in data.commands or {} do
-					if Ops.immediate[cmd.op] then
+					if Ops.immediate[cmd.op] or Ops.concurrent[cmd.op] then
 						task.spawn(execute, cmd)
 					else
 						table.insert(queue, cmd)
@@ -310,7 +310,7 @@ if context == "edit" then
 
 	local logBox = Instance.new("TextLabel")
 	logBox.Position = UDim2.fromOffset(0, 36)
-	logBox.Size = UDim2.new(1, 0, 1, -36)
+	logBox.Size = UDim2.new(1, 0, 1, -72)
 	logBox.BackgroundColor3 = Color3.fromRGB(28, 28, 31)
 	logBox.BorderSizePixel = 0
 	logBox.Font = Enum.Font.Code
@@ -326,6 +326,18 @@ if context == "edit" then
 	logPad.PaddingLeft = UDim.new(0, 6)
 	logPad.PaddingBottom = UDim.new(0, 4)
 	logPad.Parent = logBox
+
+	local notice = Instance.new("TextLabel")
+	notice.Position = UDim2.new(0, 0, 1, -32)
+	notice.Size = UDim2.new(1, 0, 0, 32)
+	notice.BackgroundTransparency = 1
+	notice.Font = Enum.Font.Gotham
+	notice.TextSize = 11
+	notice.TextColor3 = Color3.fromRGB(150, 150, 158)
+	notice.TextWrapped = true
+	notice.TextXAlignment = Enum.TextXAlignment.Left
+	notice.Text = "Publishing to Roblox: you are responsible for the rights to everything published, including what an agent picks."
+	notice.Parent = frame
 
 	ui = {
 		refresh = function()

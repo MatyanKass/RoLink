@@ -8,6 +8,7 @@ local Selection = game:GetService("Selection")
 local Api = require(script.Parent.Api)
 local Build = require(script.Parent.Build)
 local Codec = require(script.Parent.Codec)
+local Confirm = require(script.Parent.Confirm)
 local MeshImport = require(script.Parent.MeshImport)
 local Mirror = require(script.Parent.Mirror)
 local Paths = require(script.Parent.Paths)
@@ -28,11 +29,16 @@ Ops.mutating = {
 -- long scenario can't block them
 Ops.immediate = { ping = true, output_read = true, playtest_status = true, playtest_end = true, playtest_request_stop = true }
 
+-- ops that wait for a person: Main also runs them off the worker queue, so a dialog
+-- is not delayed by a long scenario and other tools keep working while it is open
+Ops.concurrent = { confirm_dialog = true }
+
 local pluginRef -- set by Main
 
 function Ops.init(plugin)
 	pluginRef = plugin
 	Playtest.init(plugin)
+	Confirm.init(plugin)
 end
 
 local function v3(v)
@@ -836,6 +842,12 @@ Ops.animation_preview = Animation.preview
 Ops.mutating.toolbox_insert = true
 Ops.mutating.toolbox_release = true
 Ops.mutating.animation_build = true
+
+-- ------------------------------------------------------------------ confirmation
+
+function Ops.confirm_dialog(args)
+	return Confirm.show(args)
+end
 
 -- ------------------------------------------------------------------ dispatch
 
