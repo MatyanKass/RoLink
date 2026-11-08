@@ -66,6 +66,7 @@ Paths: "Workspace/Map/Tower", "Workspace/Wall[2]" (2nd same-named child), "#42" 
 
 Workflow for quality builds: look first (status → tree → screenshot), build in small named batches with the build tool (JSON, local coordinates), then VERIFY with screenshot (views: iso/front/top…) and fix. Call the guide tool once before your first build — it documents the node format (at/rot/size/color/material, repeat, mirror, span, csg, refs).
 Scale: character ≈5 studs tall, door 4×7, floor-to-ceiling 10–14, walkway ≥6. Snap to 0.25/0.5 studs. Name everything.
+To look at and edit the place, prefer the file mirror: mirror_start {dir}, then use your normal file tools (read, edit, write, delete) on that folder; it explains itself in AGENTS.md.
 Code: use sync_start on a project folder (Rojo-style *.project.json) — files are pushed to Studio on save, Studio edits come back to files. Use run for one-off Luau in Studio (edit mode).`;
 
 const server = new McpServer({ name: "rolink", version: VERSION }, { instructions: INSTRUCTIONS });
@@ -303,6 +304,18 @@ reg(
 );
 reg("sync_stop", "Stop file sync.", {});
 reg("sync_status", "Sync state and recent sync activity.", {}, true);
+
+reg(
+  "mirror_start",
+  "Start a live two-way mirror of the whole place in a folder: Workspace, ReplicatedStorage, every script, model and GUI appear as files you read and edit with your normal file tools; edits apply to Studio within a second and Studio changes come back. Read AGENTS.md in the folder for the format. Prefer this for looking at and editing the place.",
+  {
+    dir: z.string().describe("Folder for the mirror (new, empty, or an earlier mirror)"),
+    services: z.array(z.string()).optional().describe("Services to mirror (default: all the commonly used ones)"),
+    deleteThreshold: z.number().int().optional().describe("Refuse a batch that deletes more instances than this (default 25)"),
+  },
+);
+reg("mirror_stop", "Stop the file mirror. The files stay on disk.", {});
+reg("mirror_status", "Mirror state: folder, counts, refused deletes, rejected files, recent errors.", {}, true);
 
 async function main() {
   if (process.argv.includes("--daemon")) {

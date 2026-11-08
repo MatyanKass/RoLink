@@ -405,6 +405,10 @@ local function buildVariant(ctx, n, v, parent, frame, mirrors, where, isTop)
 		end
 	end
 
+	if n.size ~= nil and inst:IsA("GuiObject") then
+		setProp(ctx, inst, "Size", n.size, where)
+	end
+
 	-- placement
 	local childFrame = placed
 	if n.span and isPart then

@@ -64,6 +64,9 @@ roblox.implementMethod("Model", "GetBoundingBox", function(self)
 	end
 	return roblox.CFrame.new((lo + hi) / 2), hi - lo
 end)
+roblox.implementMethod("Players", "GetPlayerFromCharacter", function()
+	return nil
+end)
 roblox.implementMethod("HttpService", "JSONEncode", function(_, v)
 	return serde.encode("json", v)
 end)

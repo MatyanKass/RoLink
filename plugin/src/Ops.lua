@@ -9,6 +9,7 @@ local Api = require(script.Parent.Api)
 local Build = require(script.Parent.Build)
 local Codec = require(script.Parent.Codec)
 local MeshImport = require(script.Parent.MeshImport)
+local Mirror = require(script.Parent.Mirror)
 local Paths = require(script.Parent.Paths)
 local Serialize = require(script.Parent.Serialize)
 local Sync = require(script.Parent.Sync)
@@ -780,6 +781,16 @@ end
 
 function Ops.sync(args)
 	return Sync.apply(args)
+end
+
+Ops.mutating.mirror_apply = true
+
+function Ops.mirror(args)
+	return Mirror.control(args)
+end
+
+function Ops.mirror_apply(args)
+	return Mirror.apply(args)
 end
 
 -- ------------------------------------------------------------------ dispatch

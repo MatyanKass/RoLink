@@ -8,6 +8,7 @@ local Root = script.Parent
 local Api = require(Root.Api)
 local Ops = require(Root.Ops)
 local Sync = require(Root.Sync)
+local Mirror = require(Root.Mirror)
 
 local VERSION = "0.1.0"
 local DEFAULT_PORT = 34872
@@ -248,6 +249,7 @@ end
 
 Ops.init(plugin)
 Sync.init(sendEvent)
+Mirror.init(sendEvent, plugin)
 
 plugin.Unloading:Connect(function()
 	wantConnected = false

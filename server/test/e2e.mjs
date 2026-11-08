@@ -29,6 +29,14 @@ async function client() {
 const text = (r) => r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
 
 // ---------------------------------------------------------------- mock plugin
+const mirrorNodes = [
+  { i: 1, p: 0, c: "Workspace", n: "Workspace", props: {} },
+  { i: 2, p: 1, c: "Part", n: "Baseplate", props: { Size: [512, 20, 512], CFrame: { p: [0, -10, 0] } } },
+  { i: 3, p: 0, c: "ReplicatedStorage", n: "ReplicatedStorage", props: {} },
+  { i: 4, p: 3, c: "ModuleScript", n: "../../escape", props: {}, src: "return 'x'\n" },
+  { i: 5, p: 3, c: "Folder", n: "Box", props: {} },
+  ...Array.from({ length: 30 }, (_, k) => ({ i: 100 + k, p: 5, c: "IntValue", n: `V${k}`, props: { Value: k } })),
+];
 const received = [];
 let session;
 let stop = false;
@@ -49,6 +57,12 @@ function handle(cmd) {
       return { roots: [{ path: "Workspace", n: "Workspace", c: "Workspace", id: 1, k: 2, ch: [{ n: "Baseplate", c: "Part", id: 2, s: [512, 20, 512], p: [0, -10, 0], k: 0 }, { n: "Fin", c: "Part", x: 6, id: 3, s: [0.2, 3, 4] }] }], nodes: 3 };
     case "build":
       return { created: [{ path: "Workspace/" + cmd.args.items[0].name, id: 9, class: "Model" }], warnings: [], parts: 1, big: "x".repeat(5000) };
+    case "mirror":
+      if (cmd.args.action === "start") return { services: cmd.args.services, others: ["Players"] };
+      if (cmd.args.action === "next") return { nodes: mirrorNodes, done: true };
+      return {};
+    case "mirror_apply":
+      return { created: cmd.args.ops.filter((o) => o.op === "create").map((o, i) => ({ t: o.t, node: { i: 9000 + i, p: o.parent, c: o.class, n: o.name, props: o.props ?? {}, src: o.source } })), nodes: [], errors: [] };
     case "boom":
       throw "kaboom";
     default:
@@ -219,8 +233,55 @@ ok(r.isError && text(r).includes("overwrite"), "export refuses to clobber outsid
 ok(fs.readFileSync(victim, "utf8") === "keep me", "victim untouched");
 fs.rmSync(outside, { recursive: true, force: true });
 
+const mirrorDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-e2e-")), "m");
+r = await c1.callTool({ name: "mirror_start", arguments: { dir: mirrorDir } });
+ok(r.isError && text(r).includes("cannot run on the same content"), "mirror refused while sync overlaps: " + text(r));
+
 r = await c1.callTool({ name: "sync_stop", arguments: {} });
 ok(text(r).includes("stopped"), "sync_stop");
+
+// ---------------------------------------------------------------- mirror
+r = await c1.callTool({ name: "mirror_start", arguments: { dir: mirrorDir } });
+ok(!r.isError, "mirror_start: " + text(r));
+const inMirror = (...p) => path.join(mirrorDir, ...p);
+ok(fs.existsSync(inMirror("Workspace", "Baseplate.Part.json")), "mirror wrote a loose part");
+ok(fs.existsSync(inMirror("AGENTS.md")) && fs.existsSync(inMirror("_tree.txt")), "root files");
+ok(fs.existsSync(inMirror("ReplicatedStorage", "%2E%2E%2F%2E%2E%2Fescape.luau")), "traversal name stays one encoded file");
+ok(!fs.existsSync(path.join(mirrorDir, "..", "..", "escape.luau")) && !fs.existsSync(path.join(mirrorDir, "..", "escape.luau")), "nothing escaped the root");
+
+r = await c1.callTool({ name: "sync_start", arguments: { project: proj } });
+ok(r.isError && text(r).includes("cannot run on the same content"), "sync refused while mirror overlaps: " + text(r));
+
+const applied = () => received.filter((c) => c.op === "mirror_apply");
+fs.writeFileSync(inMirror("ReplicatedStorage", "Buy.RemoteEvent.json"), "{}");
+for (let i = 0; i < 60 && applied().length === 0; i++) await sleep(100);
+ok(applied()[0]?.args.ops[0].class === "RemoteEvent", "new file creates an instance");
+
+const bad = inMirror("Workspace", "Baseplate.Part.json");
+fs.writeFileSync(bad, "{ broken");
+for (let i = 0; i < 60 && !(fs.existsSync(inMirror("_errors.log")) && fs.readFileSync(inMirror("_errors.log"), "utf8").includes("invalid JSON")); i++) await sleep(100);
+ok(fs.readFileSync(inMirror("_errors.log"), "utf8").includes("invalid JSON"), "bad JSON logged");
+ok(applied().length === 1, "bad JSON sends nothing to Studio");
+
+fs.rmSync(inMirror("ReplicatedStorage", "Box"), { recursive: true });
+let mirrorSt;
+for (let i = 0; i < 60; i++) {
+  mirrorSt = JSON.parse(text(await c1.callTool({ name: "mirror_status", arguments: {} })));
+  if (mirrorSt.refusedDeletes.length) break;
+  await sleep(100);
+}
+ok(mirrorSt.refusedDeletes.length === 1, "mass delete refused and reported in status");
+ok(applied().length === 1, "mass delete sent nothing to Studio");
+for (let i = 0; i < 40 && !fs.existsSync(inMirror("ReplicatedStorage", "Box", "V5.IntValue.json")); i++) await sleep(100);
+ok(fs.existsSync(inMirror("ReplicatedStorage", "Box", "V5.IntValue.json")), "mass-deleted files restored");
+
+await post("/plugin/event", { s: session, type: "mirror_delta", upserts: [{ ...mirrorNodes[4], n: "Crate" }] });
+for (let i = 0; i < 40 && !fs.existsSync(inMirror("ReplicatedStorage", "Crate", "V5.IntValue.json")); i++) await sleep(100);
+ok(fs.existsSync(inMirror("ReplicatedStorage", "Crate", "V5.IntValue.json")) && !fs.existsSync(inMirror("ReplicatedStorage", "Box")), "Studio rename moves the directory");
+
+r = await c1.callTool({ name: "mirror_stop", arguments: {} });
+ok(text(r).includes("stopped"), "mirror_stop");
+fs.rmSync(path.dirname(mirrorDir), { recursive: true, force: true });
 
 stop = true;
 await c2.close();
