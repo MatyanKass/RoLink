@@ -26,6 +26,8 @@ export interface SessionInfo {
   pluginVersion: string;
   connectedAt: number;
   lastSeen: number;
+  /** a later session for a place that was already live: receives no commands */
+  duplicate?: boolean;
 }
 
 interface Pending {
@@ -40,6 +42,8 @@ interface Session extends SessionInfo {
   queue: { id: string; op: string; args: unknown }[];
   waiter?: { res: http.ServerResponse; timer: NodeJS.Timeout };
   pending: Map<string, Pending>;
+  /** id of the live session for this place that it arrived behind */
+  duplicateOf?: string;
 }
 
 export class PluginError extends Error {}
@@ -65,6 +69,9 @@ function sameToken(a: string, b: string) {
 
 /** A page that rebinds its own domain to 127.0.0.1 still sends that domain in Host. */
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+
+/** A session this quiet with no poll open is no reason to hold back a new one for its place. */
+const LIVE_WINDOW_MS = POLL_HOLD_MS + 5_000;
 
 const MAX_CHUNKS = 1000;
 const MAX_RESULT_BYTES = 256 * 1024 * 1024;
@@ -125,9 +132,11 @@ export class Bridge extends EventEmitter {
   /**
    * Choose the session a command goes to. Defaults to the most recently
    * connected edit-mode Studio. `place` matches by place name substring.
+   * A duplicate of a live session is never chosen: /plugin/hello has no
+   * credential, so being newest must not be enough to receive commands.
    */
   pick(context: Context = "edit", place?: string): SessionInfo {
-    let candidates = [...this.sessions.values()].filter((s) => s.context === context);
+    let candidates = [...this.sessions.values()].filter((s) => s.context === context && !s.duplicateOf);
     if (place) {
       const p = place.toLowerCase();
       candidates = candidates.filter((s) => s.placeName.toLowerCase().includes(p) || String(s.placeId) === place);
@@ -181,7 +190,7 @@ export class Bridge extends EventEmitter {
     }
   }
 
-  private drop(s: Session, why: string) {
+  private drop(s: Session, why: string, promote = true) {
     this.sessions.delete(s.id);
     for (const p of s.pending.values()) {
       clearTimeout(p.timer);
@@ -193,6 +202,24 @@ export class Bridge extends EventEmitter {
     }
     log(`session ${s.placeName} [${s.context}] ${why}`);
     this.emit("session-closed", publicInfo(s));
+    if (promote) this.promoteDuplicates(s);
+  }
+
+  /** The first to arrive stays first; the others wait behind it. */
+  private promoteDuplicates(gone: Session) {
+    const waiting = [...this.sessions.values()].filter((d) => d.duplicateOf === gone.id).sort((a, b) => a.connectedAt - b.connectedAt);
+    const [next, ...rest] = waiting;
+    if (!next) return;
+    next.duplicateOf = undefined;
+    for (const d of rest) d.duplicateOf = next.id;
+    log(`session ${next.placeName} [${next.context}] takes over from the one that closed`);
+    this.emit("session", publicInfo(next));
+  }
+
+  private liveSessionFor(placeId: number): Session | undefined {
+    if (placeId <= 0) return undefined; // every unsaved place has id 0: they are different places
+    const now = Date.now();
+    return [...this.sessions.values()].find((s) => s.context === "edit" && s.placeId === placeId && !s.duplicateOf && (s.waiter || now - s.lastSeen <= LIVE_WINDOW_MS));
   }
 
   private async route(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -216,10 +243,9 @@ export class Bridge extends EventEmitter {
 
       case "POST /plugin/hello": {
         const b = (await readJson(req)) as Partial<SessionInfo> & { replaces?: string };
-        if (b.replaces) {
-          const old = this.sessions.get(b.replaces);
-          if (old) this.drop(old, "reconnected");
-        }
+        // the same plugin coming back: whatever waited behind the old session waits behind the new one
+        const replaced = b.replaces ? this.sessions.get(b.replaces) : undefined;
+        if (replaced) this.drop(replaced, "reconnected", false);
         const now = Date.now();
         const s: Session = {
           id: randomUUID(),
@@ -233,9 +259,13 @@ export class Bridge extends EventEmitter {
           queue: [],
           pending: new Map(),
         };
+        if (s.context === "edit") s.duplicateOf = this.liveSessionFor(s.placeId)?.id;
         this.sessions.set(s.id, s);
-        log(`session ${s.placeName} [${s.context}] connected`);
-        this.emit("session", publicInfo(s));
+        if (replaced) {
+          for (const d of this.sessions.values()) if (d.duplicateOf === replaced.id) d.duplicateOf = s.duplicateOf ?? s.id;
+        }
+        log(`session ${s.placeName} [${s.context}] connected${s.duplicateOf ? " as a duplicate of a live session" : ""}`);
+        if (!s.duplicateOf) this.emit("session", publicInfo(s));
         return sendJson(res, 200, { session: s.id, serverVersion: VERSION });
       }
 
@@ -330,7 +360,7 @@ export class Bridge extends EventEmitter {
         const s = this.sessions.get(b.s);
         if (!s) return sendJson(res, 410, { error: "unknown session" });
         s.lastSeen = Date.now();
-        this.emit("plugin-event", publicInfo(s), b);
+        if (!s.duplicateOf) this.emit("plugin-event", publicInfo(s), b);
         return sendJson(res, 200, { ok: true });
       }
 
@@ -365,7 +395,9 @@ export class Bridge extends EventEmitter {
 
 function publicInfo(s: Session | SessionInfo): SessionInfo {
   const { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen } = s;
-  return { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen };
+  // a flag, not the other session's id: ids are the plugin routes' only credential
+  const duplicate = "duplicateOf" in s && s.duplicateOf ? { duplicate: true } : {};
+  return { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen, ...duplicate };
 }
 
 const MAX_BODY = 64 * 1024 * 1024; // results are chunked at ~900 KB; import_model sends only paths

@@ -269,11 +269,44 @@ function closingParen(text: string, open: number): number {
   return -1;
 }
 
-const serviceReceivers = (code: string, svc: string) => {
+const MAX_GAME_NAMES = 64;
+const ASSIGNMENT = /(?<![.:\w]|,\s*)(?:local\s+)?([A-Za-z_]\w*(?:\s*:\s*[\w.]+)?(?:\s*,\s*[A-Za-z_]\w*(?:\s*:\s*[\w.]+)?)*)\s*=(?!=)\s*([^\n;]+)/g;
+
+/** Regex source matching `game` and the names that hold it (local g = game; local h = g). */
+function gameReference(code: string): string {
+  const from = new Map<string, string[]>();
+  for (const m of code.matchAll(ASSIGNMENT)) {
+    const targets = m[1].split(",");
+    const values = m[2].split(",");
+    targets.forEach((target, k) => {
+      if (values[k] === undefined) return;
+      // only a bare name: game.Workspace or game:GetService("X") is not the DataModel
+      const value = /^[(\s]*([A-Za-z_]\w*)[)\s]*/.exec(values[k]);
+      if (value && !/^[.:[({"'`]/.test(values[k].slice(value[0].length))) {
+        const list = from.get(value[1]);
+        if (list) list.push(target.split(":")[0].trim());
+        else from.set(value[1], [target.split(":")[0].trim()]);
+      }
+    });
+  }
+  const names = new Set(["game", "Game"]);
+  const todo = [...names];
+  while (todo.length && names.size < MAX_GAME_NAMES) {
+    for (const target of from.get(todo.pop()!) ?? []) {
+      if (names.size < MAX_GAME_NAMES && !names.has(target)) {
+        names.add(target);
+        todo.push(target);
+      }
+    }
+  }
+  return `(?<![.:\\w])(?:${[...names].join("|")})\\b`;
+}
+
+const serviceReceivers = (code: string, game: string, svc: string) => {
   const names = new Set<string>([svc]);
-  const decl = new RegExp(`\\blocal\\s+(\\w+)\\s*(?::\\s*[\\w.]+\\s*)?=\\s*game\\s*(?:[:.]\\s*(?:GetService|FindService)\\s*\\(\\s*["'\`]${svc}["'\`]\\s*\\)|\\.\\s*${svc}\\b)`, "g");
+  const decl = new RegExp(`\\blocal\\s+(\\w+)\\s*(?::\\s*[\\w.]+\\s*)?=\\s*${game}\\s*(?:[:.]\\s*(?:GetService|FindService)\\s*\\(\\s*["'\`]${svc}["'\`]\\s*\\)|\\.\\s*${svc}\\b)`, "g");
   for (const m of code.matchAll(decl)) names.add(m[1]);
-  return `(?:\\b(?:${[...names].join("|")})|game\\s*[:.]\\s*(?:GetService|FindService)\\s*\\(\\s*["'\`]${svc}["'\`]\\s*\\)|\\bgame\\s*\\.\\s*${svc})`;
+  return `(?:\\b(?:${[...names].join("|")})|${game}\\s*[:.]\\s*(?:GetService|FindService)\\s*\\(\\s*["'\`]${svc}["'\`]\\s*\\)|${game}\\s*\\.\\s*${svc})`;
 };
 
 function oddName(name: string): boolean {
@@ -287,6 +320,7 @@ export function scanScript(script: CollectedScript): Flag[] {
   const { name, path } = script;
   const source = oneNewline(script.source);
   const { code, masked, strings } = lexLuau(source);
+  const game = gameReference(code);
   const rawLines = source.split("\n");
   const offsets: number[] = [0];
   for (let i = 0; i < code.length; i++) if (code[i] === "\n") offsets.push(i + 1);
@@ -364,21 +398,21 @@ export function scanScript(script: CollectedScript): Flag[] {
   addAt("loadstring", "high", "loadstring: runs code built at runtime", loadstrings);
   addRule("fenv", "medium", "getfenv/setfenv: reads or changes the script environment", /\b(?:getfenv|setfenv)\b/g);
 
-  const http = rule(new RegExp(`${serviceReceivers(code, "HttpService")}\\s*[:.]\\s*(?:GetAsync|PostAsync|RequestAsync)\\b`, "g"));
-  http.push(...rule(/\bgame\s*[:.]\s*Http(?:Get|Post)(?:Async)?\b/g));
+  const http = rule(new RegExp(`${serviceReceivers(code, game, "HttpService")}\\s*[:.]\\s*(?:GetAsync|PostAsync|RequestAsync)\\b`, "g"));
+  http.push(...rule(new RegExp(`${game}\\s*[:.]\\s*Http(?:Get|Post)(?:Async)?\\b`, "g")));
   http.sort((a, b) => a - b);
   addAt("http_call", "medium", "HttpService request to an outside server", http);
 
-  addRule("teleport", "medium", "TeleportService: can send players to another place", new RegExp(`${serviceReceivers(code, "TeleportService")}\\s*[:.]\\s*Teleport\\w*`, "g"));
+  addRule("teleport", "medium", "TeleportService: can send players to another place", new RegExp(`${serviceReceivers(code, game, "TeleportService")}\\s*[:.]\\s*Teleport\\w*`, "g"));
   addRule("marketplace_prompt", "medium", "MarketplaceService purchase prompt", /[:.]\s*Prompt(?:GamePass|Product|Premium|Bundle|Purchase|Subscription|ThirdParty)\w*\s*\(/g);
-  addRule("insert_service", "medium", "InsertService: can bring in more assets at runtime", /(?:Get|Find)Service\s*\(\s*["'`]InsertService["'`]\s*\)|\bgame\s*\.\s*InsertService\b/g);
+  addRule("insert_service", "medium", "InsertService: can bring in more assets at runtime", new RegExp(`(?:Get|Find)Service\\s*\\(\\s*["'\`]InsertService["'\`]\\s*\\)|${game}\\s*\\.\\s*InsertService\\b`, "g"));
 
   const hidden: number[] = [];
-  for (const m of code.matchAll(/\.Parent\s*=\s*game\s*[:.]\s*(?:(?:GetService|FindService)\s*\(\s*["'`](\w+)["'`]\s*\)|(\w+))/g)) {
+  for (const m of code.matchAll(new RegExp(`\\.Parent\\s*=\\s*${game}\\s*[:.]\\s*(?:(?:GetService|FindService)\\s*\\(\\s*["'\`](\\w+)["'\`]\\s*\\)|(\\w+))`, "g"))) {
     if (HIDDEN_SERVICES.has(m[1] ?? m[2])) hidden.push(m.index!);
   }
   for (const svc of HIDDEN_SERVICES) {
-    const decl = new RegExp(`\\blocal\\s+(\\w+)\\s*=\\s*game\\s*[:.]\\s*(?:GetService\\s*\\(\\s*["'\`]${svc}["'\`]\\s*\\)|${svc}\\b)`, "g");
+    const decl = new RegExp(`\\blocal\\s+(\\w+)\\s*=\\s*${game}\\s*[:.]\\s*(?:GetService\\s*\\(\\s*["'\`]${svc}["'\`]\\s*\\)|${svc}\\b)`, "g");
     for (const m of code.matchAll(decl)) hidden.push(...rule(new RegExp(`\\.Parent\\s*=\\s*${m[1]}\\b`, "g")));
   }
   hidden.sort((a, b) => a - b);
@@ -431,7 +465,7 @@ export function scanScript(script: CollectedScript): Flag[] {
   if ((dynamicCode || flags.some((f) => f.id === "fenv")) && /\bOnServer(?:Event|Invoke)\b/.test(code)) {
     addAt("remote_dynamic_code", "high", "remote input reaches code that runs dynamic code (unwanted admin access pattern)", rule(/\bOnServer(?:Event|Invoke)\b/g));
   }
-  if (dynamicCode && /\bIsStudio\s*\(|\bMaxPlayers\b|\bgame\s*\.\s*(?:PlaceId|GameId|CreatorId)\b|\bPrivateServerId\b/.test(code)) {
+  if (dynamicCode && new RegExp(`\\bIsStudio\\s*\\(|\\bMaxPlayers\\b|${game}\\s*\\.\\s*(?:PlaceId|GameId|CreatorId)\\b|\\bPrivateServerId\\b`).test(code)) {
     addAt("environment_gate", "high", "dynamic code gated on Studio, place or player-count checks (suspicious pattern)", [firstDynamic]);
   }
   const userGate = rule(/\.\s*UserId\s*[=~]=\s*\d{2,}|\b\d{2,}\s*[=~]=\s*[\w.]*UserId\b/g);

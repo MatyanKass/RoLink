@@ -457,3 +457,54 @@ test("the stored report does not outlive a successful release", async () => {
   const r = JSON.parse((await toolboxRelease({ path: report.path, target: "Workspace", enableScripts: true }, s.send)).text);
   assert.equal(r.refused, true);
 });
+
+// ---------------------------------------------------------------- aliases of game
+
+for (const [name, src, id] of [
+  ["semicolon", 'local g = game; g:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["service held in a local", 'local g = game\nlocal h = g:GetService("HttpService")\nh:GetAsync(u)', "http_call"],
+  ["alias of an alias", 'local a = game\nlocal b = a\nb:GetService("HttpService"):RequestAsync({})', "http_call"],
+  ["no separator before the next statement", 'local g = game print(1)\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["multiple assignment", 'local n, g = 1, game\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["type annotation", 'local g: DataModel = game\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["parentheses", 'local g = (game)\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["global assignment", 'g = game\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["dot access to the service", 'local g = game\ng.HttpService:PostAsync(u, b)', "http_call"],
+  ["HttpGet", 'local g = game\ng:HttpGet(u)', "http_call"],
+  ["deprecated Game global", 'Game:GetService("HttpService"):PostAsync(u, b)', "http_call"],
+  ["teleport", 'local g = game\ng:GetService("TeleportService"):Teleport(1, p)', "teleport"],
+  ["insert service by dot", 'local g = game\nlocal i = g.InsertService', "insert_service"],
+  ["hidden parent", 'local g = game\nx.Parent = g:GetService("CoreGui")', "hidden_parent"],
+  ["hidden parent through a local", 'local g = game\nlocal c = g.CoreGui\nx.Parent = c', "hidden_parent"],
+  ["environment gate", 'local g = game\nif g.PlaceId == 1 then loadstring(x)() end', "environment_gate"],
+]) {
+  test(`alias of game is followed: ${name}`, () => {
+    assert.ok(has(src, id), `${id} missing for: ${src}`);
+  });
+}
+
+test("things that only look like an alias of game are not followed", () => {
+  assert.ok(!has('local g = game.Workspace\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"), "g is Workspace");
+  assert.ok(!has('local g = (game).Workspace\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"), "g is Workspace in parentheses");
+  assert.ok(!has('local g = game:GetService("Workspace")\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"), "g is a service");
+  assert.ok(!has('local s = "local g = game"\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"), "text in a string");
+  assert.ok(!has('-- local g = game\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"), "text in a comment");
+  assert.ok(!has('if g == game then end\ng:GetService("HttpService"):PostAsync(u, b)', "http_call"), "a comparison");
+  assert.ok(!has('local g = game\nfoo.g:GetService("HttpService"):PostAsync(u, b)', "http_call"), "a field with the same name");
+});
+
+test("a very long chain of aliases does not stall the scan", () => {
+  const lines = ["local v0 = game"];
+  for (let i = 1; i < 3000; i++) lines.push(`local v${i} = v${i - 1}`);
+  const t0 = Date.now();
+  ids(lines.join("\n"));
+  assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
+});
+
+test("untrusted scripts cannot make the alias search quadratic", () => {
+  for (const src of ["a,".repeat(200000) + "a", "x = y\n".repeat(200000)]) {
+    const t0 = Date.now();
+    ids(src);
+    assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
+  }
+});

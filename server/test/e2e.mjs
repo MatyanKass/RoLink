@@ -203,8 +203,9 @@ fs.writeFileSync(
       $className: "DataModel",
       ReplicatedStorage: { Shared: { $path: "src/shared" } },
       ServerScriptService: { $path: "src/server" },
-      Workspace: { Baseplate: { $className: "Part", $properties: { Color: [0.5, 0.5, 0.5], Size: [512, 20, 512] } } },
-      Lighting: { $properties: { Brightness: 2 } },
+      Workspace: { $properties: { FilteringEnabled: false }, Baseplate: { $className: "Part", $properties: { Color: [0.5, 0.5, 0.5], Size: [512, 20, 512], LinkedSource: "rbxassetid://1" } } },
+      Lighting: { $properties: { Brightness: 2, LoadStringEnabled: true } },
+      HttpService: { $properties: { HttpEnabled: true } },
     },
   }),
 );
@@ -213,6 +214,10 @@ fs.writeFileSync(path.join(proj, "src", "shared", "Util", "init.luau"), "return 
 fs.writeFileSync(path.join(proj, "src", "shared", "Util", "Math.luau"), "return 2\n");
 fs.writeFileSync(path.join(proj, "src", "server", "Main.server.lua"), "print('hi')\n");
 fs.writeFileSync(path.join(proj, "src", "shared", "Crate.model.json"), JSON.stringify({ class: "Model", children: [{ name: "Box", size: [2, 2, 2] }] }));
+fs.writeFileSync(path.join(proj, "src", "shared", "Items.meta.json"), JSON.stringify({ properties: { Capabilities: "x", Archivable: false } }));
+fs.writeFileSync(path.join(proj, "src", "shared", "Util", "init.meta.json"), JSON.stringify({ properties: { Sandboxed: true, Archivable: false } }));
+fs.writeFileSync(path.join(proj, "src", "shared", "Danger.model.json"), JSON.stringify({ ClassName: "Model", Properties: { Sandboxed: true }, Children: [{ ClassName: "Script", Properties: { LinkedSource: "rbxassetid://2", Disabled: true } }] }));
+fs.writeFileSync(path.join(proj, "src", "shared", "Spec.model.json"), JSON.stringify({ class: "Model", attrs: { HttpEnabled: "just a label" }, children: [{ name: "P", class: "Part", HttpProxyURL: "http://x", props: { Capabilities: "y", Transparency: 1 } }] }));
 
 r = await c1.callTool({ name: "sync_start", arguments: { project: proj } });
 ok(!r.isError, "sync_start: " + text(r));
@@ -227,6 +232,20 @@ ok(byPath["ServerScriptService/Main"].class === "Script", "server script under s
 ok(byPath["Workspace/Baseplate"].props.Color === "#808080", "Rojo Color3 floats -> hex");
 ok(byPath["Lighting"].props.Brightness === 2, "service props");
 ok(byPath["ReplicatedStorage/Shared/Crate"].spec.children[0].name === "Box", "model.json spec");
+
+// a project file is as untrusted as a mirror file: the same properties are refused
+ok(!("LoadStringEnabled" in byPath["Lighting"].props), "$properties: sensitive property dropped");
+ok(byPath["HttpService"] === undefined || !("HttpEnabled" in byPath["HttpService"].props), "$properties: HttpEnabled dropped");
+ok(byPath["Workspace"] === undefined || !("FilteringEnabled" in byPath["Workspace"].props), "$properties: FilteringEnabled dropped");
+ok(!("LinkedSource" in byPath["Workspace/Baseplate"].props) && byPath["Workspace/Baseplate"].props.Size, "$properties on a part: safe ones stay");
+ok(!("Capabilities" in byPath["ReplicatedStorage/Shared/Items"].props) && byPath["ReplicatedStorage/Shared/Items"].props.Archivable === false, "meta.json on a file");
+ok(!("Sandboxed" in byPath["ReplicatedStorage/Shared/Util"].props) && byPath["ReplicatedStorage/Shared/Util"].props.Archivable === false, "init.meta.json on a folder");
+const dangerSpec = byPath["ReplicatedStorage/Shared/Danger"].spec;
+ok(!("Sandboxed" in dangerSpec.props) && !("LinkedSource" in dangerSpec.children[0].props) && dangerSpec.children[0].props.Disabled === true, "Rojo model.json, nested children included");
+const specSpec = byPath["ReplicatedStorage/Shared/Spec"].spec;
+ok(!("HttpProxyURL" in specSpec.children[0]) && !("Capabilities" in specSpec.children[0].props) && specSpec.children[0].props.Transparency === 1, "RoLink model.json, nested children included");
+ok(specSpec.attrs.HttpEnabled === "just a label", "attributes are not properties");
+for (const p of ["LoadStringEnabled", "HttpEnabled", "FilteringEnabled", "LinkedSource", "Capabilities", "Sandboxed", "HttpProxyURL"]) ok(text(r).includes(p), `sync_start warns about ${p}: ${text(r).slice(0, 400)}`);
 ok(!("file" in byPath["ReplicatedStorage/Shared/Items"]), "no local paths sent");
 ok(full.roots.some((p) => p.join("/") === "ReplicatedStorage/Shared"), "roots");
 
@@ -241,6 +260,13 @@ ok(patch.upsert.length === 1 && patch.upsert[0].source.includes("gold"), "only t
 await post("/plugin/event", { s: session, type: "source", path: ["ServerScriptService", "Main"], class: "Script", source: "print('edited in studio')\n" });
 await sleep(300);
 ok(fs.readFileSync(path.join(proj, "src", "server", "Main.server.lua"), "utf8").includes("edited in studio"), "Studio edit written to file");
+
+// a second session for the same place cannot write through the bridge
+const dupForSync = (await post("/plugin/hello", { context: "edit", placeName: "TestPlace", placeId: 1, gameId: 2, pluginVersion: "fake" })).session;
+await post("/plugin/event", { s: dupForSync, type: "source", path: ["ServerScriptService", "Main"], class: "Script", source: "print('from the duplicate')\n" });
+await sleep(300);
+ok(!fs.readFileSync(path.join(proj, "src", "server", "Main.server.lua"), "utf8").includes("from the duplicate"), "events from a duplicate session are ignored");
+await post("/plugin/bye", { s: dupForSync });
 await post("/plugin/event", { s: session, type: "created", path: ["ReplicatedStorage", "Shared", "Util", "NewThing"], class: "ModuleScript", source: "return 3\n" });
 await sleep(300);
 ok(fs.existsSync(path.join(proj, "src", "shared", "Util", "NewThing.luau")), "script created in Studio gets a file");
@@ -377,6 +403,140 @@ ok(fs.existsSync(inMirror("ReplicatedStorage", "Crate", "V5.IntValue.json")) && 
 r = await c1.callTool({ name: "mirror_stop", arguments: {} });
 ok(text(r).includes("stopped"), "mirror_stop");
 fs.rmSync(path.dirname(mirrorDir), { recursive: true, force: true });
+
+// ---------------------------------------------------------------- duplicate sessions
+const edit = (placeId, placeName, extra = {}) => post("/plugin/hello", { context: "edit", placeName, placeId, gameId: 2, pluginVersion: "fake", ...extra }).then((b) => b.session);
+function poller(s) {
+  const got = [];
+  (async () => {
+    for (;;) {
+      const x = await fetch(`${BASE}/plugin/poll?s=${s}`).catch(() => null);
+      if (!x || x.status !== 200) return;
+      for (const cmd of (await x.json()).commands ?? []) {
+        got.push(cmd.op);
+        await post("/plugin/result", { s, id: cmd.id, ok: true, result: { from: s } });
+      }
+    }
+  })();
+  return got;
+}
+const builds = () => received.filter((c) => c.op === "build").length;
+const build = (place) => c1.callTool({ name: "build", arguments: { items: [{ name: "X" }], ...(place ? { place } : {}) } });
+const healthOf = async (placeId) => (await (await fetch(`${BASE}/health`)).json()).sessions.filter((x) => x.placeId === placeId);
+const statusText = async () => text(await c1.callTool({ name: "status", arguments: {} }));
+
+// a fake "newest plugin" for a live place gets nothing
+const fakeId = await edit(1, "EvilTwin");
+const fakeGot = poller(fakeId);
+await sleep(100);
+let n = builds();
+r = await build();
+ok(!r.isError && builds() === n + 1 && fakeGot.length === 0, "default routing stays on the live session");
+n = builds();
+r = await build("1");
+ok(!r.isError && builds() === n + 1 && fakeGot.length === 0, "routing by place id stays on the live session");
+r = await build("EvilTwin");
+ok(r.isError && text(r).includes("No edit session") && fakeGot.length === 0, "a duplicate cannot be chosen by its own name");
+ok(/EvilTwin.*duplicate/i.test(await statusText()), "status reports the duplicate");
+let h = await healthOf(1);
+ok(h.length === 2 && h.find((x) => x.placeName === "EvilTwin").duplicate === true && !h.find((x) => x.placeName === "TestPlace").duplicate, "health marks only the duplicate");
+ok(!JSON.stringify(h).includes(session) && !JSON.stringify(h).includes(fakeId), "health still has no session ids");
+await post("/plugin/bye", { s: fakeId });
+ok(!/duplicate/i.test(await statusText()), "the report goes away with the duplicate");
+
+// a replaces: hello for the same place is a normal reconnect, and takes over at once
+const oldId = await edit(501, "Reconnecting");
+const oldGot = poller(oldId);
+await sleep(100);
+const newId = await edit(501, "Reconnecting", { replaces: oldId });
+const newGot = poller(newId);
+await sleep(100);
+ok(!(await build("501")).isError && newGot.length === 1 && oldGot.length === 0, "reconnect with replaces takes over");
+h = await healthOf(501);
+ok(h.length === 1 && !h[0].duplicate, "the replaced session is gone and nothing is a duplicate");
+await post("/plugin/bye", { s: newId });
+
+// a replaces: naming a session that is not there does not take over a live place
+const liveId = await edit(502, "Stable");
+const liveGot = poller(liveId);
+await sleep(100);
+const wrongId = await edit(502, "Stable", { replaces: "no-such-session" });
+const wrongGot = poller(wrongId);
+await sleep(100);
+ok(!(await build("502")).isError && liveGot.length === 1 && wrongGot.length === 0, "an unknown replaces id does not take over");
+await post("/plugin/bye", { s: wrongId });
+await post("/plugin/bye", { s: liveId });
+
+// the live session reconnecting must not hand the place to a duplicate waiting behind it
+const realId = await edit(504, "Real");
+const realGot = poller(realId);
+await sleep(100);
+const twinId = await edit(504, "Twin");
+const twinGot = poller(twinId);
+await sleep(100);
+const backId = await edit(504, "Real", { replaces: realId });
+const backGot = poller(backId);
+await sleep(100);
+ok(!(await build("504")).isError && backGot.length === 1 && twinGot.length === 0, "a reconnect keeps the place from a waiting duplicate");
+h = await healthOf(504);
+ok(h.length === 2 && h.find((x) => x.placeName === "Twin").duplicate && !h.find((x) => x.placeName === "Real").duplicate, "the duplicate stays reported after the reconnect");
+await post("/plugin/bye", { s: backId });
+ok(!(await build("504")).isError && twinGot.length === 1, "the waiting session is used once the live one really leaves");
+await post("/plugin/bye", { s: twinId });
+await post("/plugin/bye", { s: realId });
+
+// when the first session leaves, the duplicate is used
+const firstId = await edit(503, "Handover");
+poller(firstId);
+await sleep(100);
+const secondId = await edit(503, "Handover");
+const secondGot = poller(secondId);
+await sleep(100);
+await post("/plugin/bye", { s: firstId });
+ok(!(await build("503")).isError && secondGot.length === 1, "a duplicate takes over once the first session has left");
+h = await healthOf(503);
+ok(h.length === 1 && !h[0].duplicate, "it is no longer reported as a duplicate");
+await post("/plugin/bye", { s: secondId });
+
+// several different places, and several unsaved ones (place id 0), stay independent
+const aId = await edit(601, "PlaceA");
+const bId = await edit(602, "PlaceB");
+const aGot = poller(aId);
+const bGot = poller(bId);
+await sleep(100);
+ok(!(await build("601")).isError && aGot.length === 1 && bGot.length === 0, "first place routed");
+ok(!(await build("602")).isError && aGot.length === 1 && bGot.length === 1, "second place routed");
+const u1 = await edit(0, "UnsavedOne");
+const u2 = await edit(0, "UnsavedTwo");
+const u1Got = poller(u1);
+const u2Got = poller(u2);
+await sleep(100);
+ok(!(await build("UnsavedOne")).isError && u1Got.length === 1, "unsaved place one routed");
+ok(!(await build("UnsavedTwo")).isError && u2Got.length === 1, "unsaved place two routed");
+ok(!/duplicate/i.test(await statusText()), "different places are not duplicates");
+for (const s of [aId, bId, u1, u2]) await post("/plugin/bye", { s });
+
+// a session that stopped polling expires, and the duplicate takes over (real TTL, about 50 s)
+const silentId = await edit(701, "Expiring");
+const heirId = await edit(701, "Expiring");
+const heirGot = poller(heirId);
+const staleId = await edit(702, "Reopened");
+await sleep(100);
+h = await healthOf(701);
+ok(h.length === 2 && h.filter((x) => x.duplicate).length === 1, "second session waits behind the first");
+// a session gone quiet for a while is not "live": a reopened Studio is routed to at once
+await sleep(21_000);
+const reopenedId = await edit(702, "Reopened");
+const reopenedGot = poller(reopenedId);
+await sleep(100);
+h = await healthOf(702);
+ok(h.length === 2 && !h.some((x) => x.duplicate), "a session that stopped polling is not a reason to hold the new one back");
+ok(!(await build("702")).isError && reopenedGot.length === 1, "the reopened Studio gets the commands");
+for (let i = 0; i < 400 && (await healthOf(701)).length === 2; i++) await sleep(100);
+h = await healthOf(701);
+ok(h.length === 1 && !h[0].duplicate, "the first session expired and the duplicate is promoted");
+ok(!(await build("701")).isError && heirGot.length === 1, "commands go to the promoted session");
+for (const s of [heirId, reopenedId, silentId, staleId]) await post("/plugin/bye", { s });
 
 stop = true;
 await c2.close();

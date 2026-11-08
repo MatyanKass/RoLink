@@ -18,6 +18,7 @@ import path from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 import { type CompactApi, propsOf } from "./apidump.js";
 import { log } from "./config.js";
+import { isSensitiveProp } from "./mirrorformat.js";
 
 export interface SyncItem {
   path: string[];
@@ -94,6 +95,37 @@ function convertProps(api: CompactApi | undefined, className: string, props: Rec
   return out;
 }
 
+const sensitiveWarning = (where: string, name: string) => `${where}: "${name}" affects place security or outside code and cannot be set from a project file; change it in Studio`;
+
+/** A project folder is as untrusted as a mirror folder: the same properties stay out of Studio. */
+function withoutSensitive(props: Record<string, unknown> | undefined, where: string, warnings: string[]) {
+  if (!props) return props;
+  const entries = Object.entries(props).filter(([k]) => {
+    if (!isSensitiveProp(k)) return true;
+    warnings.push(sensitiveWarning(where, k));
+    return false;
+  });
+  return Object.fromEntries(entries);
+}
+
+const MAX_SPEC_DEPTH = 100;
+
+/** The same for a whole model.json, whose properties can sit on any node at any depth. */
+function cleanSpec(v: unknown, where: string, warnings: string[], depth = 0): unknown {
+  if (!v || typeof v !== "object") return v;
+  if (depth > MAX_SPEC_DEPTH) {
+    warnings.push(`${where}: nested too deeply, the rest was dropped`);
+    return null;
+  }
+  if (Array.isArray(v)) return v.map((x) => cleanSpec(x, where, warnings, depth + 1));
+  const out: [string, unknown][] = [];
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (isSensitiveProp(k)) warnings.push(sensitiveWarning(where, k));
+    else out.push([k, k === "attrs" ? x : cleanSpec(x, where, warnings, depth + 1)]);
+  }
+  return Object.fromEntries(out);
+}
+
 /** Rojo .model.json -> RoLink build node. */
 function rojoModelToSpec(api: CompactApi | undefined, m: any, name?: string): any {
   const cls = m.ClassName ?? "Folder";
@@ -164,7 +196,7 @@ export class Project {
         if (instPath.length <= 1) {
           // a service maps straight onto a directory: its files become children
           if (instPath.length === 1 && node.$properties)
-            snap.items.push({ path: instPath, props: convertProps(this.api, instPath[0], node.$properties) });
+            snap.items.push({ path: instPath, props: this.projectProps(instPath[0], node.$properties, instPath, snap) });
           snap.dirs.set(key(instPath), abs);
           await this.walkDirChildren(abs, instPath, snap);
         } else {
@@ -174,13 +206,17 @@ export class Project {
         await this.walkFile(abs, instPath, snap);
       }
     } else if (instPath.length === 1) {
-      if (node.$properties) snap.items.push({ path: instPath, props: convertProps(this.api, instPath[0], node.$properties) });
+      if (node.$properties) snap.items.push({ path: instPath, props: this.projectProps(instPath[0], node.$properties, instPath, snap) });
     } else if (instPath.length > 1) {
       const c = cls ?? "Folder";
-      snap.items.push({ path: instPath, class: c, props: convertProps(this.api, c, node.$properties) });
+      snap.items.push({ path: instPath, class: c, props: this.projectProps(c, node.$properties, instPath, snap) });
     }
 
     for (const [name, child] of children) await this.walkNode(child, [...instPath, name], snap);
+  }
+
+  private projectProps(className: string, props: Record<string, unknown> | undefined, instPath: string[], snap: Snapshot) {
+    return convertProps(this.api, className, withoutSensitive(props, instPath.join("/"), snap.warnings));
   }
 
   private async readMeta(file: string): Promise<{ properties?: Record<string, unknown>; className?: string } | null> {
@@ -205,7 +241,7 @@ export class Project {
       item = { path: instPath, class: forcedClass ?? meta?.className ?? "Folder", file: this.rel(abs) };
     }
     const props = { ...(extraProps ?? {}), ...(meta?.properties ?? {}) };
-    if (Object.keys(props).length) item.props = convertProps(this.api, item.class!, props);
+    if (Object.keys(props).length) item.props = this.projectProps(item.class!, props, instPath, snap);
     snap.items.push(item);
     snap.dirs.set(key(instPath), abs);
     await this.walkDirChildren(abs, instPath, snap);
@@ -237,7 +273,7 @@ export class Project {
       const text = await fsp.readFile(abs, "utf8");
       try {
         const j = JSON.parse(text);
-        const spec = j.ClassName ? rojoModelToSpec(this.api, j) : j;
+        const spec = cleanSpec(j.ClassName ? rojoModelToSpec(this.api, j) : j, file, snap.warnings);
         item = { path: instPath, spec, hash: sha1(text), file };
       } catch (e) {
         snap.warnings.push(`${file}: bad JSON (${String(e)})`);
@@ -260,7 +296,7 @@ export class Project {
       };
     }
     if (!item) return;
-    if (meta?.properties && item.class) item.props = { ...(item.props ?? {}), ...convertProps(this.api, item.class, meta.properties) };
+    if (meta?.properties && item.class) item.props = { ...(item.props ?? {}), ...this.projectProps(item.class, meta.properties, instPath, snap) };
     snap.items.push(item);
   }
 

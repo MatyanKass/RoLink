@@ -175,7 +175,7 @@ export class Core {
       lines.push("No Studio connected. Open a place in Roblox Studio; the RoLink plugin connects automatically (toolbar RoLink → panel → Connect).");
     } else {
       for (const s of sessions)
-        lines.push(`• ${s.placeName} [${s.context}] placeId=${s.placeId} plugin v${s.pluginVersion} (last poll ${Math.round((Date.now() - s.lastSeen) / 1000)}s ago)`);
+        lines.push(`• ${s.placeName} [${s.context}] placeId=${s.placeId} plugin v${s.pluginVersion} (last poll ${Math.round((Date.now() - s.lastSeen) / 1000)}s ago)${s.duplicate ? " DUPLICATE of a live session for this place: gets no commands until that one closes or expires. If you did not open this place twice, another program on this PC may be posing as Studio." : ""}`);
     }
     if (this.sync) {
       const st = this.sync.status();

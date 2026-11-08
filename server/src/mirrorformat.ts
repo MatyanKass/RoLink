@@ -96,6 +96,8 @@ const SENSITIVE_PROPS = new Set([
   "AllowInsertFreeAssets", // AssetService
 ]);
 
+export const isSensitiveProp = (name: string) => SENSITIVE_PROPS.has(name);
+
 /** Sensitive properties never enter the shadow, so the files never hold them and any on disk is a new attempt. */
 export function dropSensitive(props: Rec | undefined): Rec | undefined {
   if (!props || !Object.keys(props).some((k) => SENSITIVE_PROPS.has(k))) return props;
