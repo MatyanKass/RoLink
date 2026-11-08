@@ -8,6 +8,7 @@ local Selection = game:GetService("Selection")
 local Api = require(script.Parent.Api)
 local Build = require(script.Parent.Build)
 local Codec = require(script.Parent.Codec)
+local Confirm = require(script.Parent.Confirm)
 local MeshImport = require(script.Parent.MeshImport)
 local Paths = require(script.Parent.Paths)
 local Serialize = require(script.Parent.Serialize)
@@ -22,10 +23,14 @@ Ops.mutating = {
 	terrain = true, import_rbxm = true, sync = true, mesh_build = true, insert_asset = true,
 }
 
+-- ops that wait for a person: run beside the command queue so other tools keep working
+Ops.concurrent = { confirm_dialog = true }
+
 local pluginRef -- set by Main
 
 function Ops.init(plugin)
 	pluginRef = plugin
+	Confirm.init(plugin)
 end
 
 local function v3(v)
@@ -780,6 +785,12 @@ end
 
 function Ops.sync(args)
 	return Sync.apply(args)
+end
+
+-- ------------------------------------------------------------------ confirmation
+
+function Ops.confirm_dialog(args)
+	return Confirm.show(args)
 end
 
 -- ------------------------------------------------------------------ dispatch

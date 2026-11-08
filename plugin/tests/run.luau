@@ -324,4 +324,136 @@ do
 	model:Destroy()
 end
 
+-------------------------------------------------------------------------------
+H.section("Build: publisher placeholders")
+
+do
+	local res = Build.run(ws, { { class = "Sound", name = "Pending", attrs = { RoLinkPendingAsset = "abc-123" } } }, {})
+	local sound = res.created[1]
+	check(sound.ClassName == "Sound" and sound.Parent == ws, "placeholder Sound created")
+	check(sound:GetAttribute("RoLinkPendingAsset") == "abc-123", "placeholder carries the pending attribute")
+	check(#res.warnings == 0, "no build warnings: " .. table.concat(res.warnings, "; "))
+	sound:Destroy()
+
+	local decal = Build.run(ws, { { class = "Decal", name = "Poster", attrs = { RoLinkPendingAsset = "x" } } }, {}).created[1]
+	check(decal.ClassName == "Decal" and decal:GetAttribute("RoLinkPendingAsset") == "x", "placeholder Decal created")
+	decal:Destroy()
+end
+
+-------------------------------------------------------------------------------
+H.section("Confirm dialog")
+
+do
+	local task = require("@lune/task")
+	local created = {}
+	local function signal()
+		local fns = {}
+		return {
+			Connect = function(_, fn)
+				table.insert(fns, fn)
+				return { Disconnect = function() table.remove(fns, table.find(fns, fn)) end }
+			end,
+			fire = function()
+				for _, fn in table.clone(fns) do
+					fn()
+				end
+			end,
+		}
+	end
+	local fakeInstance = {
+		new = function(class)
+			local o = { ClassName = class, MouseButton1Click = signal() }
+			o.Destroy = function()
+				o.destroyed = true
+			end
+			table.insert(created, o)
+			return o
+		end,
+	}
+	local widget = { Enabled = false }
+	function widget:BindToClose(fn)
+		self.onClose = fn
+	end
+	local widgetsMade = 0
+	local plugin = {}
+	function plugin:CreateDockWidgetPluginGui()
+		widgetsMade += 1
+		return widget
+	end
+	local Confirm = H.requireWith("Confirm", {
+		Instance = fakeInstance,
+		DockWidgetPluginGuiInfo = { new = function() return {} end },
+		Enum = roblox.Enum,
+		UDim2 = roblox.UDim2,
+		UDim = roblox.UDim,
+		Color3 = Color3,
+	})
+	Confirm.init(plugin)
+
+	local function latest(name)
+		for i = #created, 1, -1 do
+			if created[i].Name == name and not created[i].destroyed then
+				return created[i]
+			end
+		end
+		return nil
+	end
+	local function run(args, act)
+		local result
+		task.spawn(function()
+			result = Confirm.show(args)
+		end)
+		task.wait(0.05)
+		act()
+		task.wait(0.2)
+		return result
+	end
+	local ARGS = { title = "T", text = "Body", confirmLabel = "Go", timeout = 5 }
+
+	local shown
+	local r = run(ARGS, function()
+		shown = { enabled = widget.Enabled, title = widget.Title, body = latest("Body").Text, label = latest("Confirm").Text }
+		latest("Confirm").MouseButton1Click:fire()
+	end)
+	check(r and r.confirmed == true, "pressing confirm returns true")
+	check(shown.enabled and shown.title == "T" and shown.body == "Body" and shown.label == "Go", "dialog shows title, text and label")
+	check(widget.Enabled == false, "dialog closes after an answer")
+
+	r = run(ARGS, function()
+		latest("Cancel").MouseButton1Click:fire()
+	end)
+	check(r and r.confirmed == false, "pressing cancel returns false")
+
+	r = run(ARGS, function()
+		widget.onClose()
+	end)
+	check(r and r.confirmed == false, "closing the window returns false")
+
+	r = run({ title = "T", text = "B", confirmLabel = "Go", timeout = 0.1 }, function() end)
+	check(r == nil, "the shortest timeout is clamped to 1 s")
+	task.wait(1)
+	check(widget.Enabled == false, "dialog closes on timeout")
+
+	local timedOut
+	task.spawn(function()
+		timedOut = Confirm.show({ title = "T", text = "B", confirmLabel = "Go", timeout = 1 })
+	end)
+	task.wait(1.3)
+	check(timedOut and timedOut.confirmed == false and timedOut.reason == "timeout", "timeout returns false with a reason")
+
+	local first
+	task.spawn(function()
+		first = Confirm.show(ARGS)
+	end)
+	task.wait(0.05)
+	local second = Confirm.show(ARGS)
+	check(second.confirmed == false and second.reason == "busy", "a second dialog while one is open is refused")
+	latest("Cancel").MouseButton1Click:fire()
+	task.wait(0.2)
+	check(first and first.confirmed == false, "first dialog still answers")
+
+	check(widgetsMade == 1, "the widget is reused")
+	check(not pcall(Confirm.show, {}), "title and text are required")
+end
+
 H.done()

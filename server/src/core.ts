@@ -112,6 +112,9 @@ export class Core {
         return this.syncStop();
       case "sync_status":
         return json(this.sync ? this.sync.status() : { active: false });
+      case "confirm_dialog":
+        // the plugin closes the dialog itself at `timeout`; wait a bit longer for its answer
+        return json(await this.op(args, "confirm_dialog", pick(args, ["title", "text", "confirmLabel", "timeout"]), (Number(args.timeout ?? 120) + 15) * 1000));
     }
     throw new Error(`unknown tool ${tool}`);
   }
