@@ -14,6 +14,8 @@ import { randomUUID } from "node:crypto";
 import { PREVIEW_EXTS, UPLOAD_EXTS, loadModel, prepareChunks, validateModelPath } from "./meshimport.js";
 import { uploadConfig, uploadModel } from "./assetupload.js";
 import { Playtests } from "./playtest.js";
+import { toolboxInsert, toolboxRelease, toolboxSearch } from "./toolbox.js";
+import { importAnimation } from "./animation.js";
 
 export interface ImageOut {
   data: string; // base64
@@ -115,6 +117,14 @@ export class Core {
         return this.importFile(args);
       case "import_model":
         return this.importModel(args);
+      case "toolbox_search":
+        return toolboxSearch(args, (op, p, t) => this.op(args, op, p, t));
+      case "toolbox_insert":
+        return toolboxInsert(args, (op, p, t) => this.op(args, op, p, t));
+      case "toolbox_release":
+        return toolboxRelease(args, (op, p, t) => this.op(args, op, p, t));
+      case "import_animation":
+        return importAnimation(args, (op, p, t) => this.op(args, op, p, t));
       case "sync_start":
         return this.syncStart(args);
       case "sync_stop":

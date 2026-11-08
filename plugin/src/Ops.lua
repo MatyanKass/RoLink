@@ -820,6 +820,23 @@ Ops.output_read = function(args)
 	return Playtest.readOutput(args)
 end
 
+-- ------------------------------------------------------------------ toolbox, animation
+
+local Animation = require(script.Parent.Animation)
+local Toolbox = require(script.Parent.Toolbox)
+
+Ops.toolbox_search = Toolbox.search
+Ops.toolbox_insert = Toolbox.insert
+Ops.toolbox_release = Toolbox.release
+Ops.animation_rig_info = Animation.rigInfo
+Ops.animation_stage = Animation.stage
+Ops.animation_discard = Animation.discard
+Ops.animation_build = Animation.build
+Ops.animation_preview = Animation.preview
+Ops.mutating.toolbox_insert = true
+Ops.mutating.toolbox_release = true
+Ops.mutating.animation_build = true
+
 -- ------------------------------------------------------------------ dispatch
 
 function Ops.ping()
