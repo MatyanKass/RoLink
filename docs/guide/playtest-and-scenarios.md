@@ -109,6 +109,10 @@ playtest_scenario {"context":"client","source":"T.step('hud', function() T.asser
 
 `run {"context":"server","code":"..."}` runs one-off Luau inside a test as well.
 
+A client can press a real ProximityPrompt with `prompt:InputHoldBegin()` and `prompt:InputHoldEnd()`, after moving the character into range. Called on the server, these do nothing.
+
+Roblox refuses HTTP on a play-test client, so the client context talks to RoLink through the server context over a RemoteEvent named `__RoLinkClientRelay` in `ReplicatedStorage`. It exists only inside tests, and game code can see it. If the client never connects, look in Output for a warning starting with `[RoLink]`.
+
 ## Several players
 
 ```call

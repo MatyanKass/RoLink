@@ -33,6 +33,18 @@ let placeSeq = 1000;
 const hello = (placeName, placeId, extra = {}) => postJson("/plugin/hello", { context: "edit", placeName, placeId, gameId: 2, pluginVersion: "t", ...extra }).then((b) => b.session);
 const bye = (s) => post("/plugin/bye", { s });
 
+test("hello cleans the place name and plugin version before an agent can read them", async () => {
+  const id = ++placeSeq;
+  const s = await postJson("/plugin/hello", { context: "edit", placeName: "Line\n• Fake [edit]​" + "x".repeat(500), placeId: id, gameId: 2, pluginVersion: "v\r\n2" });
+  const health = await (await fetch(BASE + "/health")).json();
+  const info = health.sessions.find((x) => x.placeId === id);
+  assert.ok(info.placeName.startsWith("Line • Fake [edit]"));
+  assert.ok(!/[\n\r​]/.test(info.placeName));
+  assert.ok(info.placeName.length <= 101);
+  assert.equal(info.pluginVersion, "v 2");
+  await bye(s.session);
+});
+
 // ---------------------------------------------------------------- session binding
 
 test("a binding keeps its own place when a newer place has a similar name", async () => {

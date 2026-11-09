@@ -649,9 +649,15 @@ export async function searchCreatorStore(apiKey: string, a: { query?: unknown; k
     signal: AbortSignal.timeout(30_000),
   });
   const text = await r.text();
-  if (!r.ok) throw new Error(`Creator Store search failed (HTTP ${r.status}): ${clean(text.split(apiKey).join("<redacted>"), 300)}`);
+  if (!r.ok) {
+    const message = `Creator Store search failed (HTTP ${r.status}): ${clean(text.split(apiKey).join("<redacted>"), 300)}`;
+    throw r.status === 401 || r.status === 403 ? new SearchKeyRefused(message) : new Error(message);
+  }
   return parseSearchResponse(JSON.parse(text));
 }
+
+/** The key is missing or lacks creator-store-product:read; Studio's own listing still works. */
+export class SearchKeyRefused extends Error {}
 
 // ------------------------------------------------------------------ tools
 
@@ -667,17 +673,24 @@ export async function toolboxSearch(args: Args, send: Send, env: NodeJS.ProcessE
   const body = buildSearchBody(args);
   const kind: string = args.kind ?? "model";
   const key = env.ROBLOX_API_KEY?.trim();
+  let refused: string | undefined;
   if (key) {
-    const results = await searchCreatorStore(key, args);
-    return out({ notice: UNTRUSTED_NOTICE, source: "open-cloud", results });
+    try {
+      const results = await searchCreatorStore(key, args);
+      return out({ notice: UNTRUSTED_NOTICE, source: "open-cloud", results });
+    } catch (e) {
+      if (!(e instanceof SearchKeyRefused)) throw e;
+      refused = "Roblox refused ROBLOX_API_KEY for the Creator Store: the key needs creator-store-product:read.";
+    }
   }
   if (kind !== "model" && kind !== "decal") {
-    throw new Error(`searching ${kind} needs ROBLOX_API_KEY (Open Cloud key with creator-store-product:read) in the RoLink server environment; Studio itself can only list free models and decals`);
+    throw new Error(`${refused ?? `searching ${kind} needs ROBLOX_API_KEY (Open Cloud key with creator-store-product:read) in the RoLink server environment;`} Studio itself can only list free models and decals`);
   }
   editOnly(args);
   const r = await send("toolbox_search", { query: body.query, kind, limit: body.maxPageSize }, 60_000);
   const results = (r.results ?? []).map((x: any) => ({ id: x.id, name: clean(x.name, 120), creator: x.creator != null ? clean(x.creator, 80) : null, creatorId: null, verified: null, votes: null }));
-  return out({ notice: UNTRUSTED_NOTICE, source: "studio", note: "Studio's listing has no verified flag or votes; set ROBLOX_API_KEY for those.", results });
+  const note = refused ? `${refused} Used Studio's listing instead, which has no verified flag or votes.` : "Studio's listing has no verified flag or votes; set ROBLOX_API_KEY for those.";
+  return out({ notice: UNTRUSTED_NOTICE, source: "studio", note, results });
 }
 
 function assetIdArg(v: unknown): number {

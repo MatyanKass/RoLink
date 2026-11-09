@@ -584,6 +584,9 @@ do
 	function http:JSONDecode(s)
 		return H.serde.decode("json", s)
 	end
+	function http:GenerateGUID()
+		return "guid"
+	end
 	function http:RequestAsync(req)
 		local reply = {}
 		if string.find(req.Url, "/plugin/hello", 1, true) then
@@ -623,7 +626,13 @@ do
 		return nil
 	end
 	function fakePlugin:SetSetting() end
-	H.requireWith("Main.server", { game = fakeGame, plugin = fakePlugin })
+	run.PlayerRemoving = { Connect = function() end }
+	local fakeRelay = { OnServerEvent = { Connect = function() end }, SetAttribute = function() end }
+	H.requireWith("Main.server", {
+		game = fakeGame,
+		plugin = fakePlugin,
+		Instance = { new = function() return fakeRelay end },
+	})
 
 	local function results()
 		local parts, total = {}, nil

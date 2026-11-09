@@ -14,7 +14,7 @@ const app = createPublisher();
 
 const INSTRUCTIONS = `rolink-publish uploads audio, images, animations and places to Roblox from the user's own account, and manages the experience's data stores and live servers.
 Assets are a two-step flow: prepare_asset, then show the summary to the user and wait until the user types the phrase in chat, then publish_asset (publish_animation for animations). Never type or infer the phrase on the user's behalf.
-server_restart, datastore_set and datastore_delete wait for a button press in Studio.
+place_publish, server_restart, datastore_set and datastore_delete wait for a Yes in a native window on this computer.
 ${RESPONSIBILITY_NOTICE}`;
 
 const server = new McpServer({ name: "rolink-publish", version: VERSION }, { instructions: INSTRUCTIONS });

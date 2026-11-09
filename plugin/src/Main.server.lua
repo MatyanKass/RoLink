@@ -6,6 +6,7 @@ local RunService = game:GetService("RunService")
 
 local Root = script.Parent
 local Api = require(Root.Api)
+local ClientRelay = require(Root.ClientRelay)
 local Ops = require(Root.Ops)
 local Sync = require(Root.Sync)
 local Mirror = require(Root.Mirror)
@@ -47,7 +48,7 @@ local function setStatus(s)
 	end
 end
 
-local function request(method, path, body)
+local function sendDirect(method, path, body)
 	local ok, res = pcall(function()
 		return HttpService:RequestAsync({
 			Url = base .. path,
@@ -59,13 +60,44 @@ local function request(method, path, body)
 	if not ok then
 		return nil, tostring(res)
 	end
+	return res.StatusCode, res.Body
+end
+
+local function relayKey()
+	return plugin:GetSetting(ClientRelay.KEY_SETTING)
+end
+
+-- Every DataModel of this plugin shares its settings; game code cannot read them.
+if context ~= "client" and type(relayKey()) ~= "string" then
+	plugin:SetSetting(ClientRelay.KEY_SETTING, HttpService:GenerateGUID(false) .. HttpService:GenerateGUID(false))
+end
+
+-- A play-test client cannot use HttpService; its traffic goes through the server context.
+local send = sendDirect
+if context == "client" then
+	send = ClientRelay.attachClient(function()
+		return game:GetService("ReplicatedStorage"):WaitForChild(ClientRelay.NAME, 30)
+	end, relayKey, function()
+		local players = game:GetService("Players")
+		while not players.LocalPlayer do
+			task.wait(0.1)
+		end
+		return players.LocalPlayer.UserId
+	end, HttpService:GenerateGUID(false))
+end
+
+local function request(method, path, body)
+	local status, text = send(method, path, body)
+	if not status then
+		return nil, tostring(text)
+	end
 	local data
-	if res.Body and #res.Body > 0 then
+	if text and #text > 0 then
 		pcall(function()
-			data = HttpService:JSONDecode(res.Body)
+			data = HttpService:JSONDecode(text)
 		end)
 	end
-	return res.StatusCode, data
+	return status, data
 end
 
 local function postJson(path, tbl)
@@ -245,6 +277,8 @@ local function ensureApi()
 	return false
 end
 
+local helloFailureShown = false
+
 local function hello()
 	local status, data = postJson("/plugin/hello", {
 		context = context,
@@ -255,6 +289,11 @@ local function hello()
 		replaces = session or prevSession,
 	})
 	if status ~= 200 or not data or not data.session then
+		-- Play-test contexts have no panel, so this is the only place the reason can show up.
+		if context ~= "edit" and not helloFailureShown then
+			helloFailureShown = true
+			warn(("[RoLink] %s context cannot reach the server: %s %s"):format(context, tostring(status), tostring(data)))
+		end
 		return false
 	end
 	session = data.session
@@ -450,6 +489,20 @@ if context == "edit" then
 else
 	-- Play-test DataModels connect too, so runtime state can be inspected.
 	if plugin:GetSetting("RoLinkAutoConnect") ~= false and plugin:GetSetting("RoLinkPlayConnect") ~= false then
+		if context == "server" then
+			local remote = Instance.new("RemoteEvent")
+			remote.Name = ClientRelay.NAME
+			remote.Archivable = false
+			remote.Parent = game:GetService("ReplicatedStorage")
+			ClientRelay.attachServer(remote, game:GetService("Players"), sendDirect, {
+				decode = function(text)
+					return HttpService:JSONDecode(text)
+				end,
+				encode = function(value)
+					return HttpService:JSONEncode(value)
+				end,
+			}, relayKey, HttpService:GenerateGUID(false))
+		end
 		wantConnected = true
 		connectLoop()
 	end

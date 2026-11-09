@@ -442,6 +442,7 @@ local fsLib = require("@lune/fs")
 luauLib.load(fsLib.readFile("playtest.luau"), { debugName = "playtest" })(H)
 luauLib.load(fsLib.readFile("editor.luau"), { debugName = "editor" })(H)
 luauLib.load(fsLib.readFile("audit.luau"), { debugName = "audit" })(H)
+luauLib.load(fsLib.readFile("clientrelay.luau"), { debugName = "clientrelay" })(H)
 
 
 -------------------------------------------------------------------------------
@@ -775,6 +776,9 @@ do
 	local polls = 0
 	local unload
 	local http = {}
+	function http:GenerateGUID()
+		return "guid"
+	end
 	function http:RequestAsync(req)
 		local reply = {}
 		if string.find(req.Url, "/plugin/hello", 1, true) then
@@ -823,8 +827,14 @@ do
 		return nil
 	end
 	function fakePlugin:SetSetting() end
+	run.PlayerRemoving = { Connect = function() end }
+	local fakeRelay = { OnServerEvent = { Connect = function() end }, SetAttribute = function() end }
 
-	H.requireWith("Main.server", { game = fakeGame, plugin = fakePlugin })
+	H.requireWith("Main.server", {
+		game = fakeGame,
+		plugin = fakePlugin,
+		Instance = { new = function() return fakeRelay end },
+	})
 	local function waitFor(cond)
 		for _ = 1, 200 do
 			if cond() then

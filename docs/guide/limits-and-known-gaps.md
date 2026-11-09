@@ -8,14 +8,17 @@ Before promising something, or when a workaround seems necessary.
 
 ## Verification status
 
-The code is tested with automated mocks: a mock Studio plugin, a Lune harness simulating Roblox instances, fake Open Cloud, and fake dialogs. **Real Roblox Studio and the live Open Cloud API have not been verified end to end.** Treat a behaviour that depends on real Studio as likely, not proven, particularly:
+The code is tested with automated mocks: a mock Studio plugin, a Lune harness simulating Roblox instances, fake Open Cloud, and fake dialogs.
 
-- `playtest_start` and `multiplayer_test` through `StudioTestService`;
-- `profile_scripts`;
+Checked in real Roblox Studio (version 0.746, Windows, 2026-11-09): connecting, `build` with CSG, GUI, ProximityPrompt and scripts, `undo`, `screenshot`, the two-way mirror (edits, new files, deletes, Studio changes coming back), `playtest_start`, `multiplayer_test` with 2 clients, server and client scenarios, `output_read` in both contexts, `import_model` in preview mode, `toolbox_insert` and `toolbox_release`, `import_animation`, `script_search`, `script_outline`, `script_diagnostics`, `perf_stats`, `profile_scripts`, `weld_model`, `terrain`, and `asset_quota` against the live Open Cloud API.
+
+**Still not verified against real Roblox.** Treat these as likely, not proven:
+
+- uploads: `publish_asset`, `publish_animation`, `place_save`, `place_publish`, `import_model` in upload mode;
+- `server_restart` and the data store tools, and the native confirmation dialog on a real desktop;
+- Creator Store search through Open Cloud with a key that has `creator-store-product:read`;
 - `generate_model`, which Roblox's docs do not confirm for plugins;
 - mesh loading by id;
-- CSG through `GeometryService`;
-- publishing animations with a KeyframeSequence root;
 - the screenshot crop on unusual layouts.
 
 ## What Roblox does not let a plugin do

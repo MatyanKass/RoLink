@@ -3,8 +3,46 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  lexLuau, scanScript, buildReport, buildSearchBody, parseSearchResponse, searchCreatorStore, UNTRUSTED_NOTICE, toolboxInsert, toolboxRelease,
+  lexLuau, scanScript, buildReport, buildSearchBody, parseSearchResponse, searchCreatorStore, UNTRUSTED_NOTICE, toolboxInsert, toolboxRelease, toolboxSearch,
 } from "../dist/toolbox.js";
+
+async function withRefusingStore(status, fn) {
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{"errors":[{"message":"Scope not authorized."}]}', { status });
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+test("toolbox_search falls back to Studio's listing when the key is refused, and says why", async () => {
+  await withRefusingStore(403, async () => {
+    const sent = [];
+    const send = async (op, payload) => {
+      sent.push({ op, payload });
+      return { results: [{ id: 5, name: "Crate", creator: "X" }] };
+    };
+    const r = JSON.parse((await toolboxSearch({ query: "crate" }, send, { ROBLOX_API_KEY: "KEY123" })).text);
+    assert.equal(r.source, "studio");
+    assert.equal(r.results[0].id, 5);
+    assert.match(r.note, /creator-store-product:read/);
+    assert.equal(sent[0].op, "toolbox_search");
+    assert.ok(!JSON.stringify(r).includes("KEY123"));
+  });
+});
+
+test("toolbox_search with a refused key names the scope for kinds Studio cannot list", async () => {
+  await withRefusingStore(403, async () => {
+    await assert.rejects(() => toolboxSearch({ query: "x", kind: "audio" }, async () => ({}), { ROBLOX_API_KEY: "KEY123" }), /creator-store-product:read/);
+  });
+});
+
+test("toolbox_search does not hide other Creator Store failures", async () => {
+  await withRefusingStore(500, async () => {
+    await assert.rejects(() => toolboxSearch({ query: "x" }, async () => ({ results: [] }), { ROBLOX_API_KEY: "KEY123" }), /HTTP 500/);
+  });
+});
 
 const ids = (src, name = "Script") => scanScript({ path: name, name, class: "Script", enabled: true, source: src }).map((f) => f.id);
 const has = (src, id) => ids(src).includes(id);

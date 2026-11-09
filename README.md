@@ -4,7 +4,7 @@ RoLink connects AI agents to a live Roblox Studio through the [Model Context Pro
 
 ## Status
 
-**Tested with automated mocks only.** The test suites use a mock Studio plugin, a Lune harness that simulates Roblox instances, a fake Open Cloud and fake dialogs. Real Roblox Studio and the live Open Cloud API have not been verified end to end. Expect rough edges. Known gaps are listed in [docs/guide/limits-and-known-gaps.md](docs/guide/limits-and-known-gaps.md).
+**Early version.** Building, GUI, the file mirror, play-tests (including multiplayer), model and animation import and Creator Store quarantine have been checked in real Roblox Studio. Real uploads to Roblox (sounds, images, animations, places) and the data store tools have only been tested against a fake Open Cloud. Expect rough edges. The exact list and known gaps are in [docs/guide/limits-and-known-gaps.md](docs/guide/limits-and-known-gaps.md).
 
 ## Features
 
@@ -131,7 +131,7 @@ npm test
 
 RoLink подключает ИИ-агентов к запущенному Roblox Studio через MCP. Агент видит плейс как файлы, строит, пишет скрипты, запускает и проверяет игру, публикует ассеты. Каждое изменение появляется в Studio сразу и отменяется одним Ctrl+Z.
 
-**Статус:** проверено только автоматическими тестами на моках. В настоящем Roblox Studio и с живым Open Cloud полной проверки ещё не было.
+**Статус:** ранняя версия. Стройка, GUI, зеркало в файлы, плейтесты, импорт и карантин Toolbox проверены в настоящем Roblox Studio. Настоящая загрузка ассетов в Roblox и инструменты Data Store проверены только на имитации Open Cloud.
 
 **Установка:** нужны Node.js 20+ и Roblox Studio. В папке `server` выполните `npm install` и `npm run build`, затем из корня репозитория `node plugin/build.mjs --install`. Добавьте в свой MCP-клиент команду `node /полный/путь/RoLink/server/dist/index.js`. Откройте плейс в Studio и разрешите плагину доступ к `127.0.0.1` и изменение скриптов.
 

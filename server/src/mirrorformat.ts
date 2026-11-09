@@ -661,7 +661,7 @@ export function treeOverview(services: MNode[], otherServices: string[]): string
   };
   for (const s of services) visit(s, "");
   if (cut) lines.push("... (cut at 20000 lines)");
-  if (otherServices.length) lines.push("", "Other services (not mirrored, nothing to edit): " + otherServices.map((x) => clean(x, 60)).join(", "));
+  if (otherServices.length) lines.push("", "Other services (not mirrored, nothing to edit): " + otherServices.map((x) => clean(x, 60)).filter(Boolean).join(", "));
   return lines.join("\n") + "\n";
 }
 

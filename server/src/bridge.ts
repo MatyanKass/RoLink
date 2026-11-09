@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { COMMAND_TIMEOUT_MS, HOST, POLL_HOLD_MS, PORT, SESSION_TTL_MS, VERSION, log } from "./config.js";
+import { clean } from "./toolbox.js";
 
 export type Context = "edit" | "server" | "client";
 
@@ -292,10 +293,11 @@ export class Bridge extends EventEmitter {
         const s: Session = {
           id: randomUUID(),
           context: (b.context as Context) ?? "edit",
-          placeName: String(b.placeName ?? "Place"),
+          // game code can set game.Name, and these end up in text an agent reads
+          placeName: clean(b.placeName ?? "Place", 100),
           placeId: Number(b.placeId ?? 0),
           gameId: Number(b.gameId ?? 0),
-          pluginVersion: String(b.pluginVersion ?? "?"),
+          pluginVersion: clean(b.pluginVersion ?? "?", 40),
           connectedAt: now,
           lastSeen: now,
           queue: [],
