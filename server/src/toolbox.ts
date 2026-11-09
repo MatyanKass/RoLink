@@ -613,11 +613,14 @@ export interface SearchResult {
   name: string;
   creator: string | null;
   creatorId: number | null;
-  verified: boolean | null;
   votes: { up: number; down: number; count: number; percentUp: number | null } | null;
 }
 
-/** The API documents `asset` as untyped, so id and name are read defensively. */
+/**
+ * The API documents `asset` as untyped, so id and name are read defensively.
+ * creator.verified is left out on purpose: it came back true for every result in real searches,
+ * including for a creator whose ProductInfo has no verified badge. toolbox_insert reports the badge.
+ */
 export function parseSearchResponse(body: any): SearchResult[] {
   const out: SearchResult[] = [];
   for (const item of body?.creatorStoreAssets ?? []) {
@@ -631,7 +634,6 @@ export function parseSearchResponse(body: any): SearchResult[] {
       name: clean(asset.name ?? asset.displayName ?? "", 120),
       creator: creator.name != null ? clean(creator.name, 80) : null,
       creatorId: creator.userId ?? creator.groupId ?? null,
-      verified: typeof creator.verified === "boolean" ? creator.verified : null,
       votes: voting ? { up: voting.upVotes ?? 0, down: voting.downVotes ?? 0, count: voting.voteCount ?? 0, percentUp: voting.upVotePercent ?? null } : null,
     });
   }
@@ -688,8 +690,8 @@ export async function toolboxSearch(args: Args, send: Send, env: NodeJS.ProcessE
   }
   editOnly(args);
   const r = await send("toolbox_search", { query: body.query, kind, limit: body.maxPageSize }, 60_000);
-  const results = (r.results ?? []).map((x: any) => ({ id: x.id, name: clean(x.name, 120), creator: x.creator != null ? clean(x.creator, 80) : null, creatorId: null, verified: null, votes: null }));
-  const note = refused ? `${refused} Used Studio's listing instead, which has no verified flag or votes.` : "Studio's listing has no verified flag or votes; set ROBLOX_API_KEY for those.";
+  const results = (r.results ?? []).map((x: any) => ({ id: x.id, name: clean(x.name, 120), creator: x.creator != null ? clean(x.creator, 80) : null, creatorId: null, votes: null }));
+  const note = refused ? `${refused} Used Studio's listing instead, which has no votes.` : "Studio's listing has no votes; set ROBLOX_API_KEY for those.";
   return out({ notice: UNTRUSTED_NOTICE, source: "studio", note, results });
 }
 

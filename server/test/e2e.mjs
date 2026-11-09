@@ -309,7 +309,7 @@ ok(!/malware|malicious|backdoor|virus|trojan/i.test(JSON.stringify(toolNames.fil
 
 r = await c1.callTool({ name: "toolbox_search", arguments: { query: "tree" } });
 let body = JSON.parse(text(r));
-ok(body.source === "studio" && body.results[0].id === 7 && body.results[0].verified === null, "search falls back to Studio");
+ok(body.source === "studio" && body.results[0].id === 7 && body.results[0].votes === null, "search falls back to Studio");
 ok(/untrusted data/i.test(body.notice), "search results labelled untrusted");
 r = await c1.callTool({ name: "toolbox_search", arguments: { query: "tree", kind: "audio" } });
 ok(r.isError && text(r).includes("creator-store-product:read"), "audio search without a key explains the scope");

@@ -8,8 +8,8 @@ Assets from the Creator Store can contain unwanted scripts. RoLink never puts on
 
 | Environment of the RoLink server | Source | Result fields |
 |---|---|---|
-| `ROBLOX_API_KEY` set (Open Cloud key with `creator-store-product:read`) | Open Cloud `POST https://apis.roblox.com/toolbox-service/v2/assets:search` | id, name, creator, verified, votes |
-| No key, `kind` is model or decal | Studio `InsertService:GetFreeModelsAsync` / `GetFreeDecalsAsync` | id, name, creator; verified and votes are `null` |
+| `ROBLOX_API_KEY` set (Open Cloud key with `creator-store-product:read`) | Open Cloud `POST https://apis.roblox.com/toolbox-service/v2/assets:search` | id, name, creator, votes |
+| No key, `kind` is model or decal | Studio `InsertService:GetFreeModelsAsync` / `GetFreeDecalsAsync` | id, name, creator; votes are `null` |
 | No key, other kinds | none | clear error |
 
 The key is sent only in the `x-api-key` header.

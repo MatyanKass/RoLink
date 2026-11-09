@@ -52,7 +52,7 @@ Events: `Triggered(player)`, `TriggerEnded(player)`, `PromptButtonHoldBegan(play
 
 Key presses cannot be injected. Two workable approaches, both in [playtest-and-scenarios](playtest-and-scenarios.md):
 
-1. In a `client` context, `ProximityPrompt:InputHoldBegin()` and `InputHoldEnd()` drive the prompt the way custom prompt UI does. This has not been verified in real Studio by this project.
+1. In a `client` context, `ProximityPrompt:InputHoldBegin()` and `InputHoldEnd()` drive the prompt the way custom prompt UI does. Checked in real Studio: the character must be in range, and the server's `Triggered` event fires.
 
 ```lua
 T.step("door opens", function()

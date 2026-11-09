@@ -99,7 +99,7 @@ Each tool example in this guide is written as the tool name followed by its JSON
 
 ## Status of this software
 
-The code is covered by automated tests that use mock Studio and mock Open Cloud. Behaviour against real Roblox Studio and the live Open Cloud API has not been verified end to end. When a tool's result disagrees with this guide, believe the tool, and see [troubleshooting](troubleshooting.md).
+The code is covered by automated tests that use mock Studio and mock Open Cloud. Most tools have also been checked in real Roblox Studio; real uploads have not. The exact list is in [limits-and-known-gaps](limits-and-known-gaps.md). When a tool's result disagrees with this guide, believe the tool, and see [troubleshooting](troubleshooting.md).
 
 ## Gotchas
 

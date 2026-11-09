@@ -296,11 +296,11 @@ const SAMPLE = {
 test("search response is normalized; missing data stays null; bad items dropped", () => {
   const r = parseSearchResponse(SAMPLE);
   assert.equal(r.length, 2);
-  assert.deepEqual(r[0], { id: 42, name: "Tree", creator: "Maker", creatorId: 5, verified: true, votes: { up: 10, down: 2, count: 12, percentUp: 83 } });
+  assert.deepEqual(r[0], { id: 42, name: "Tree", creator: "Maker", creatorId: 5, votes: { up: 10, down: 2, count: 12, percentUp: 83 } });
   assert.equal(r[1].id, 43);
   assert.equal(r[1].name, "Rock");
   assert.equal(r[1].creatorId, 6);
-  assert.equal(r[1].verified, null);
+  assert.ok(!("verified" in r[0]));
   assert.equal(r[1].votes, null);
 });
 
