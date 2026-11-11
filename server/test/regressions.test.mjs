@@ -634,3 +634,24 @@ test("screenshot: PowerShell is run by absolute path and the place name cannot b
   const src = fs.readFileSync(path.join(here, "..", "src", "screenshot.ts"), "utf8");
   assert.doesNotMatch(src, /execFile\(\s*"powershell/);
 });
+
+test("rpc token: kept out of the shared /tmp on POSIX, per-user temp on Windows", async () => {
+  const { tokenDir } = await import("../dist/bridge.js");
+  assert.equal(tokenDir({}, "win32"), os.tmpdir());
+  assert.equal(tokenDir({ XDG_RUNTIME_DIR: "/run/user/1000" }, "linux"), path.join("/run/user/1000", "rolink"));
+  assert.equal(tokenDir({}, "darwin"), path.join(os.homedir(), ".rolink"));
+  const live = fs.readFileSync(path.join(repo, "tools", "live.mjs"), "utf8");
+  assert.match(live, /XDG_RUNTIME_DIR/, "tools/live.mjs follows the same rule");
+});
+
+test("rpc token: a bridge that cannot write its token file does not keep the port", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-tok-"));
+  const notADir = path.join(dir, "file");
+  fs.writeFileSync(notADir, "x");
+  const port = PORT + 3;
+  const env = { ...process.env, ROLINK_PORT: String(port), TEMP: notADir, TMP: notADir, TMPDIR: notADir, XDG_RUNTIME_DIR: notADir };
+  const r = spawnSync(process.execPath, [path.join(here, "..", "dist", "index.js"), "--daemon"], { env, encoding: "utf8", timeout: 20_000 });
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /could not write the rpc token file/);
+});
