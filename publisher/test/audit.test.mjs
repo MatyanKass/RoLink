@@ -84,3 +84,27 @@ test("the timer and publish_asset never both create a placeholder", async (t) =>
   await Promise.all(ticks);
   assert.equal(ctx.rl.ops("build").length, 1, JSON.stringify(ctx.rl.ops("build")));
 });
+
+// ------------------------------------------------------------------ /rpc token location (same rule as the server)
+import path from "node:path";
+import os from "node:os";
+import { tokenDir, tokenFile, tokenFileTrusted } from "../dist/rolink.js";
+
+test("token folder: temp on Windows, XDG_RUNTIME_DIR/rolink, else ~/.rolink", () => {
+  assert.equal(tokenDir({}, "win32"), os.tmpdir());
+  assert.equal(tokenDir({ XDG_RUNTIME_DIR: "/run/user/1000" }, "linux"), path.join("/run/user/1000", "rolink"));
+  assert.equal(tokenDir({}, "darwin"), path.join(os.homedir(), ".rolink"));
+  assert.equal(path.basename(tokenFile(34872, {}, "linux")), "rolink-34872.token");
+});
+
+test("POSIX: a token file is trusted only if it and its folder are this user's and private", () => {
+  const st = (uid, mode, file = true) => ({ uid, mode, isFile: () => file });
+  assert.ok(tokenFileTrusted(st(1000, 0o100600), st(1000, 0o40700), 1000, "linux"));
+  assert.ok(!tokenFileTrusted(st(1001, 0o100600), st(1000, 0o40700), 1000, "linux"), "another user's file");
+  assert.ok(!tokenFileTrusted(st(1000, 0o100600), st(1001, 0o40700), 1000, "linux"), "another user's folder");
+  assert.ok(!tokenFileTrusted(st(1000, 0o100644), st(1000, 0o40700), 1000, "linux"), "readable by others");
+  assert.ok(!tokenFileTrusted(st(1000, 0o100600), st(1000, 0o40777), 1000, "linux"), "folder writable by others");
+  assert.ok(!tokenFileTrusted(st(1000, 0o120777, false), st(1000, 0o40700), 1000, "linux"), "a symlink is not a regular file");
+  assert.ok(tokenFileTrusted(st(0, 0o100666), st(0, 0o40777), undefined, "win32"));
+  assert.ok(!tokenFileTrusted(st(0, 0, false), st(0, 0), undefined, "win32"));
+});
