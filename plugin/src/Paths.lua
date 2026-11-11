@@ -59,6 +59,11 @@ function Paths.id(inst)
 	return id
 end
 
+-- The id `inst` already has, without handing out a new one.
+function Paths.peek(inst)
+	return idOf[inst]
+end
+
 -- for the tests
 function Paths._setLimit(n)
 	maxIds = n

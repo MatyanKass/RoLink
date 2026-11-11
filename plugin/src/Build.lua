@@ -574,13 +574,18 @@ function Build.run(parent, items, opts)
 	local created = {}
 	local ctx = { warnings = {}, refs = {}, defaults = defaults, count = 0, parts = 0, csg = 0 }
 
+	-- only what was there before this build is replaced: repeat/mirror variants and
+	-- several items share a name, and must not replace one another
+	local before = opts.replace and parent:GetChildren() or nil
 	for i, n in items do
 		local where = "[" .. i .. "]"
 		local built = buildNode(ctx, n, nil, frame, {}, where, true)
 		for _, inst in built do
-			if opts.replace then
-				for _, old in parent:GetChildren() do
-					if old.Name == inst.Name and old ~= inst then
+			if before then
+				for i2 = #before, 1, -1 do
+					local old = before[i2]
+					if old.Name == inst.Name then
+						table.remove(before, i2)
 						old:Destroy()
 					end
 				end

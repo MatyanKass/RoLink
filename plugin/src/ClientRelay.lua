@@ -17,6 +17,8 @@ local PIECE = 200 * 1024
 local MAX_BODY = 1200 * 1024
 local MAX_IN_FLIGHT = 6
 local REQUEST_TIMEOUT = 60
+-- how long a relay that has not yet sent one valid reply gets before the client tries another
+local VERIFY_TIMEOUT = 15
 
 ------------------------------------------------------------------------ HMAC-SHA256
 
@@ -263,12 +265,35 @@ function ClientRelay.attachServer(remote, players, send, json, getKey, serverNon
 	end)
 end
 
--- Client context. `getRemote()` yields until the RemoteEvent exists, or returns nil.
+-- Client context. `getRemote(rejected)` yields until a RemoteEvent with the relay's name
+-- that is not in `rejected` exists, or returns nil. Game code can make a RemoteEvent with
+-- the same name; it cannot sign replies, so a remote that has never given one valid reply
+-- is dropped after `verifyTimeout` seconds and the next one is tried.
 -- Returns request(method, path, body) -> status, text; or nil, reason.
-function ClientRelay.attachClient(getRemote, getKey, getUserId, clientNonce)
+function ClientRelay.attachClient(getRemote, getKey, getUserId, clientNonce, opts)
+	local verifyTimeout = (opts and opts.verifyTimeout) or VERIFY_TIMEOUT
 	local remote = nil
+	local remoteConn = nil
+	local verified = false
+	local rejected = setmetatable({}, { __mode = "k" })
 	local pending = {}
 	local nextId = 0
+
+	local function dropRemote(which)
+		if remote ~= which then
+			return
+		end
+		rejected[which] = true
+		remote = nil
+		verified = false
+		local conn = remoteConn
+		if conn then
+			pcall(function()
+				conn:Disconnect()
+			end)
+		end
+		remoteConn = nil
+	end
 
 	local function onReply(id, status, piece, index, total, mac)
 		local entry = pending[id]
@@ -293,6 +318,9 @@ function ClientRelay.attachClient(getRemote, getKey, getUserId, clientNonce)
 			return
 		end
 		pending[id] = nil
+		if entry.remote == remote then
+			verified = true
+		end
 		if status == 0 then
 			task.spawn(entry.thread, nil, text)
 		else
@@ -305,30 +333,41 @@ function ClientRelay.attachClient(getRemote, getKey, getUserId, clientNonce)
 		if type(key) ~= "string" then
 			return nil, "the relay key is missing from plugin settings"
 		end
-		local found = remote or getRemote()
+		local found = remote or getRemote(rejected)
 		if not found then
+			-- nothing else to try: give the rejected ones another chance next time
+			table.clear(rejected)
 			return nil, "the play-test server context has no RoLink relay"
 		end
 		if not remote then
 			remote = found
-			remote.OnClientEvent:Connect(onReply)
+			verified = false
+			remoteConn = remote.OnClientEvent:Connect(onReply)
 		end
-		local serverNonce = remote:GetAttribute("nonce")
+		local current = remote
+		local serverNonce = current:GetAttribute("nonce")
 		if type(serverNonce) ~= "string" then
+			dropRemote(current)
 			return nil, "the RoLink relay has no nonce"
 		end
+		-- may yield (waits for LocalPlayer): done before the request is registered and timed
+		local userId = getUserId()
 		nextId += 1
 		local id = nextId
-		local entry = { thread = coroutine.running(), parts = {}, received = 0, key = key }
+		local entry = { thread = coroutine.running(), parts = {}, received = 0, key = key, remote = current }
 		pending[id] = entry
-		task.delay(REQUEST_TIMEOUT, function()
+		task.delay(verified and REQUEST_TIMEOUT or verifyTimeout, function()
 			if pending[id] == entry then
 				pending[id] = nil
+				if not verified then
+					-- never answered with a valid signature: likely a look-alike made by game code
+					dropRemote(current)
+				end
 				task.spawn(entry.thread, nil, "the relay did not answer")
 			end
 		end)
-		local mac = requestMac(key, serverNonce, getUserId(), clientNonce, id, method, path, body)
-		remote:FireServer(clientNonce, id, method, path, body, mac)
+		local mac = requestMac(key, serverNonce, userId, clientNonce, id, method, path, body)
+		current:FireServer(clientNonce, id, method, path, body, mac)
 		return coroutine.yield()
 	end
 end
