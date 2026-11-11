@@ -26,7 +26,7 @@ Every request must carry `Host: 127.0.0.1:<port>` or `localhost:<port>`, and mus
 | Limit | Value |
 |---|---|
 | Poll hold | 15 s |
-| Session expiry with no poll | 45 s |
+| Session expiry with no poll | 45 s, not while a command is still running in it |
 | Default command timeout | 60 s (long operations set their own, see below) |
 | Result and large event chunk | about 700 KB, split on UTF-8 boundaries, smaller if JSON re-encoding would pass 960 KB |
 | Chunks per result | 1000 |
@@ -51,7 +51,7 @@ Each DataModel running the plugin is one session with a context:
 
 The tool argument `client` (a join-order number) exists only on `playtest_scenario`, `output_read` and `profile_scripts`. Other tools with `context: "client"` go to the newest client.
 
-**Reconnect.** After a failed poll or an HTTP 410 the plugin says `hello` again with `replaces: <old id>`, backing off 1, 2, 4, then 5 s. On a new edit session the server re-sends the whole sync project and re-dumps the mirror, so Studio wins over anything edited on disk meanwhile.
+**Reconnect.** After a failed poll or an HTTP 410 the plugin says `hello` again with `replaces: <old id>`, backing off 1, 2, 4, then 5 s. A reloaded plugin (reinstalled, or Studio reloading plugins) remembers its edit DataModel's last session id too: a random key in a non-archivable `CoreGui.RoLinkIdentity` folder points to it in the plugin's settings, so the reload is the same Studio coming back. A new window or a reopened place gets a new key. On a new edit session the server re-sends the whole sync project and re-dumps the mirror; the mirror then keeps and applies disk edits Studio did not also change, and keeps the disk copy of a real conflict in `.rolink-conflicts/` (see [mirror-basics](mirror-basics.md)).
 
 **Duplicates.** A second live edit session with the same non-zero `placeId` is a duplicate. It gets no commands and its events are ignored, because `/plugin/hello` has no credential. It takes over when the first session closes. Unpublished places all have id 0, so they are never duplicates.
 

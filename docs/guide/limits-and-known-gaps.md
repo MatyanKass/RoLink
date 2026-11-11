@@ -18,7 +18,9 @@ Checked in real Roblox Studio (version 0.746, Windows, 2026-11-09): connecting, 
 - `server_restart` and the data store tools, and the native confirmation dialog on a real desktop;
 - `generate_model`, which Roblox's docs do not confirm for plugins;
 - mesh loading by id;
-- the screenshot crop on unusual layouts.
+- the screenshot crop on unusual layouts;
+- screenshots during a play-test: the probe markers drawn by the other contexts, and holding the client camera against the game's camera script (a script that sets the camera later in the frame than every bound render step still wins; the result then says so);
+- a reloaded plugin keeping its Studio identity through `CoreGui` and plugin settings.
 
 ## What Roblox does not let a plugin do
 
@@ -55,7 +57,7 @@ Checked in real Roblox Studio (version 0.746, Windows, 2026-11-09): connecting, 
 | `MaterialVariant` and other properties outside the class table do not appear | `get`, `set` |
 | Script `Enabled`, `RunContext`, attributes and tags are not in files | `set` |
 | Terrain voxels are not mirrored | `terrain` |
-| Edits on disk while Studio is disconnected are lost | Stop editing until reconnected |
+| Edits on disk while Studio is disconnected wait on disk, and lose to Studio when it changed the same file meanwhile (the agent's copy is kept in `.rolink-conflicts/`) | Watch the `WARNING (mirror)` lines and `mirror_status` |
 | Bulk deletes are refused | `delete` |
 | Identity lasts only for this plugin session | Re-start after reloading |
 | A mirror or sync stays with the Studio it started on, through reconnects. If that Studio closes, it does not move to another one, even for the same place | `mirror_stop` or `sync_stop`, then start again |

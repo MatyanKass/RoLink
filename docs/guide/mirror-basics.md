@@ -18,7 +18,17 @@ mirror_status {}
 mirror_stop {}
 ```
 
-`dir` must be new, empty, or an earlier mirror. A folder with other content is refused. Starting on an earlier mirror moves its old files to `.rolink-trash/` and writes a fresh copy from Studio.
+`dir` must be new, empty, or an earlier mirror. Dot-entries such as `.git`, `.gitignore` or `.vscode` do not count, so a fresh git repository is fine. A folder with other content is refused.
+
+Starting on an earlier mirror moves only the files that mirror wrote (listed in `.rolink-mirror.json`) to `.rolink-trash/run-<time>/` and writes a fresh copy from Studio. The last three runs are kept there. Nothing else moves: dot-entries, a `README.md`, your own notes, anything the mirror did not write stays where it is.
+
+### Your own files in the mirror folder
+
+The mirror only ever moves, rewrites or deletes files it wrote itself, on start, on reconnect and when an instance leaves the place.
+
+- At the top level and in dot-folders: ignored entirely.
+- Inside a service folder (for example `Workspace/notes.md`): left as they are and listed in `mirror_status` under `foreignFiles`. They are not applied to Studio at start. If you edit one later, it is read like any new file: a mirror file name creates an instance, any other name is logged in `_errors.log` as not a mirror file.
+- One sitting exactly where the mirror wants to write an instance's file: kept, listed under `blockedFiles`, and the mirror's own file for that instance is written only after you move or delete yours.
 
 Only one mirror runs at a time. A mirror and `sync_start` refuse to run over the same services.
 
@@ -137,6 +147,18 @@ Delete the file or directory, or remove the entry from `children`. A batch that 
 
 Changes made in Studio, by a person or by another tool, reach the files about a quarter of a second later. If you saved a file after the last write RoLink made to it, your edit wins and is applied.
 
+## When Studio does not take an edit
+
+If an edit cannot be applied (Studio reconnecting, closed, or busy), your files stay exactly as you wrote them. Nothing is reloaded over them.
+
+- `mirror_status` lists them under `unappliedEdits`, and every tool result carries `WARNING (mirror): ... NOT in Studio yet` until they land.
+- When Studio answers again, the place is reloaded and your edits are applied on top. The next tool result says they reached Studio.
+- If Studio changed the same file meanwhile, that is a conflict: Studio's version is written to the file, and yours is kept in `.rolink-conflicts/<time>/<path>`. `mirror_status.conflicts` and a one-time warning name both. Re-apply what you still need.
+- If Studio removed or renamed the instance whose file you edited, your edited copy is kept in `.rolink-conflicts/` the same way.
+- If Studio refuses the same edit three times while connected, the file is left as you wrote it, listed under `rejectedFiles`, and not retried until you change it.
+
+A mirror stays with the Studio it was started on. If that Studio is gone for good (closed, or a different place opened), the warning says so: copy what you still need from the unapplied files, then `mirror_stop` and `mirror_start` on the open Studio. `mirror_stop` names the edits that never reached Studio.
+
 ## Gotchas
 
 **On parts and attachments, placement lives in `CFrame`.** `Position`, `Rotation` and `Orientation` are not written for them, since they are derived from it. On every other class they are ordinary properties: `GuiObject.Position`, `ParticleEmitter.Rotation` and `AlignPosition.Position` appear in the files and can be edited.
@@ -145,7 +167,7 @@ Changes made in Studio, by a person or by another tool, reach the files about a 
 
 **Not everything is in the files.** Terrain voxels, `Archivable=false` instances, players and characters, and script properties other than source are absent. See [mirror-reference](mirror-reference.md).
 
-**Reconnecting overwrites disk.** If Studio disconnects, disk edits made meanwhile are lost when it comes back, because Studio is the source of truth.
+**Studio wins only real conflicts.** After a reconnect, a file only Studio changed is rewritten, a file only you changed keeps your version and is applied, and a file both changed is a conflict (see above).
 
 **Names are case-insensitive on disk.** `wall` and `Wall` under one parent get the suffix `~2`.
 

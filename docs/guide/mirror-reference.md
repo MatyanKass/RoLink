@@ -146,7 +146,11 @@ Studio-side failures for one property are logged as `REJECTED <full name>.<prop>
 
 ## Reading and writing safety
 
-Writes go to `.rolink-tmp/`, then rename. Symlinks are never followed. Dot-prefixed entries are ignored by the watcher. Text from the place written to `_tree.txt`, `_errors.log` and `_info` is cleaned of control and invisible characters.
+Writes go to `.rolink-tmp/`, then rename. Symlinks are never followed. Dot-prefixed entries are ignored by the watcher and never moved, rewritten or deleted.
+
+Ownership: `.rolink-mirror.json` lists every file and directory this mirror wrote. Only those are moved to `.rolink-trash/run-<time>/` on the next start, rewritten on a reload, or deleted when their instance leaves the place; a directory is removed only once it is empty. A marker from an older version without that list counts the mirror-named files inside service folders as the mirror's. A file the agent edited is never deleted with its instance: it moves to `.rolink-conflicts/`.
+
+`mirror_status` fields beyond the counts: `waitingForStudio`, `unappliedEdits` (`file`, `since`, `reason`, `attempts`), `unappliedCount`, `conflicts` (`file`, `kept`, `reason`), `foreignFiles`, `foreignCount`, `blockedFiles`, `refusedDeletes`, `rejectedFiles`, `recentErrors`, and `studio` (`connected`, the place's current name, or a note when the bound Studio is gone). Text from the place written to `_tree.txt`, `_errors.log` and `_info` is cleaned of control and invisible characters.
 
 ## Gotchas
 

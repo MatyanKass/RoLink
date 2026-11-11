@@ -61,7 +61,7 @@ local function show(v, depth)
 end
 
 local function compile(source)
-	local wrapped = "return function(T, print, warn, args, plugin) " .. source .. "\nend"
+	local wrapped = "return function(T, print, warn, args, plugin, require) " .. source .. "\nend"
 	local okLs, f, err = pcall(loadstring, wrapped, "=scenario")
 	if okLs and f then
 		return f()
@@ -78,6 +78,31 @@ local function compile(source)
 		return nil, tostring(fn)
 	end
 	return fn
+end
+
+local MODULE_COPY_WARNING = "require(%s) gave the scenario its own copy of that ModuleScript: the plugin runs apart from the game's scripts, "
+	.. "so state the module keeps (tables, flags, counters, connections) is not the game's, and changing it does not reach the game. "
+	.. "Read and change game state through instances, attributes, Value objects, BindableEvents/BindableFunctions or the game's remotes instead; "
+	.. "pure helpers and constants from the module are fine."
+
+-- `require` as the scenario sees it: the real one, noting game ModuleScripts (see MODULE_COPY_WARNING)
+local function watchedRequire(report)
+	local seen = {}
+	return function(target)
+		local inGame = false
+		pcall(function()
+			inGame = typeof(target) == "Instance" and target:IsA("ModuleScript") and target:FindFirstAncestorWhichIsA("DataModel") ~= nil
+		end)
+		if inGame then
+			local name = target:GetFullName()
+			if not seen[name] then
+				seen[name] = true
+				report.warnings = report.warnings or {}
+				table.insert(report.warnings, string.format(MODULE_COPY_WARNING, name))
+			end
+		end
+		return require(target)
+	end
 end
 
 local function errorHandler(e)
@@ -341,7 +366,7 @@ function Scenario.run(args, deps)
 				ctx.emit("output", print, ...)
 			end, function(...)
 				ctx.emit("warning", warn, ...)
-			end, args.args, deps.plugin)
+			end, args.args, deps.plugin, watchedRequire(report))
 		end, errorHandler))
 	end)
 

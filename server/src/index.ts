@@ -374,13 +374,13 @@ reg(
   "mirror_start",
   "Start a live two-way mirror of the whole place in a folder: Workspace, ReplicatedStorage, every script, model and GUI appear as files you read and edit with your normal file tools; edits apply to Studio within a second and Studio changes come back. Read AGENTS.md in the folder for the format. Prefer this for looking at and editing the place.",
   {
-    dir: z.string().describe("Folder for the mirror (new, empty, or an earlier mirror)"),
+    dir: z.string().describe("Folder for the mirror (new, empty, or an earlier mirror). Dot-entries (.git) and files the mirror did not write are never moved or overwritten"),
     services: z.array(z.string()).optional().describe("Services to mirror (default: all the commonly used ones)"),
     deleteThreshold: z.number().int().optional().describe("Refuse a batch that deletes more instances than this (default 25, at most 100)"),
   },
 );
-reg("mirror_stop", "Stop the file mirror. The files stay on disk.", {});
-reg("mirror_status", "Mirror state: folder, counts, refused deletes, rejected files, recent errors.", {}, true);
+reg("mirror_stop", "Stop the file mirror. The files stay on disk; edits that never reached Studio are named.", {});
+reg("mirror_status", "Mirror state: folder, counts, whether its Studio is connected, edits on disk not yet in Studio, conflicts (your copy kept in .rolink-conflicts), files the mirror did not write, refused deletes, rejected files, recent errors.", {}, true);
 
 reg(
   "playtest_start",
@@ -412,7 +412,8 @@ reg("playtest_status", "Whether a play-test is running (also one the user starte
 reg(
   "playtest_scenario",
   `Run a Luau test script inside the running play-test, server context by default ("client" also works). Returns a report: per-step pass/fail, message, duration, logs and errors captured during the run. A failing step does not stop the others; an exceeded timeout cancels the code.
-Helpers in the table T: T.player(), T.character(), T.teleport(cframeOrVector), T.wait(s), T.waitFor(predicate, timeout?, label?), T.assert(cond, msg), T.equal(actual, expected, msg), T.step(name, fn), T.log(...), T.set(key, value) / T.get(key) (values last for this play-test context, across steps and scenarios). print/warn work too. See the guide tool for an example.`,
+Helpers in the table T: T.player(), T.character(), T.teleport(cframeOrVector), T.wait(s), T.waitFor(predicate, timeout?, label?), T.assert(cond, msg), T.equal(actual, expected, msg), T.step(name, fn), T.log(...), T.set(key, value) / T.get(key) (values last for this play-test context, across steps and scenarios). print/warn work too. See the guide tool for an example.
+IMPORTANT: the scenario runs in the plugin, apart from the game's scripts. require() of a game ModuleScript gives the scenario its OWN copy of that module: state it keeps is not the game's, and changing it does not reach the game (the report then carries a warning). Read and drive game state through instances, attributes, Value objects, BindableEvents/BindableFunctions or the game's remotes instead.`,
   {
     source: z.string().describe("Luau code. `T` and `args` are in scope"),
     args: z.any().optional().describe("Value exposed to the scenario as `args`"),

@@ -9,8 +9,10 @@ Default services: Workspace, ReplicatedStorage, ReplicatedFirst, ServerScriptSer
 StarterGui, StarterPack, StarterPlayer, Lighting, SoundService, Teams, Chat, TextChatService,
 MaterialService. Other services are named at the end of `_tree.txt`.
 
-`dir` must be new, empty or an earlier mirror (it holds `.rolink-mirror.json`). Files of an earlier run
-move to `.rolink-trash/` (latest run only). Dot-prefixed entries are ignored by the watcher.
+`dir` must be new, empty (dot-entries do not count) or an earlier mirror (it holds `.rolink-mirror.json`).
+The marker lists the files and directories the mirror wrote; on start only those move to
+`.rolink-trash/run-<time>/` (last three runs kept). Dot-entries and any file the mirror did not write are
+never moved, rewritten or deleted; foreign files in service folders are listed in `mirror_status`.
 
 ## Names
 
@@ -121,4 +123,9 @@ Existing Unions and MeshParts keep geometry; other properties edit normally.
 - Refused, nothing applied, files restored from Studio, reported in `_errors.log` and `mirror_status.refusedDeletes`:
   batch destroying more than `deleteThreshold` (default 25) instances, a service directory removed, the root removed.
 - `sync_start` and `mirror_start` refuse each other when their services overlap.
-- Reconnect: Studio is re-dumped and the files reconciled to it; edits made on disk while disconnected are lost.
+- Failed apply: the files stay as written, are listed as unapplied (and warned about on every tool result),
+  and nothing is rendered from the shadow until a dump succeeds. After it, they are applied again; three
+  failures while connected leave the file in place as rejected.
+- Reconnect: Studio is re-dumped and the files reconciled: changed only in Studio -> rewritten; changed only on
+  disk -> kept and applied; changed on both -> Studio's version written, the disk version kept in
+  `.rolink-conflicts/<time>/<path>` and reported.

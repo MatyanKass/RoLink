@@ -145,7 +145,7 @@ terrain {"ops":[{"op":"ball","center":[0,0,0],"radius":20,"material":"Rock"}]}
 
 ### `screenshot`
 
-`targets?`, `view?`, `views?`, `position?`, `lookAt?`, `cframe?`, `distance?`, `fov?`, `maxWidth?`, `restore?`, `hideSelection?`. Text plus JPEG images. See [editor-tools](editor-tools.md).
+`targets?`, `view?`, `views?`, `position?`, `lookAt?`, `cframe?`, `distance?`, `fov?`, `maxWidth?`, `restore?`, `hideSelection?`. Text plus JPEG images. During a play-test use `context:"client"`; a context that is not on screen is an error. See [editor-tools](editor-tools.md).
 
 ```call
 screenshot {"targets":"Workspace/Tower","view":"iso"}
@@ -255,7 +255,7 @@ sync_status {}
 
 ### `mirror_start`
 
-`dir`, `services?`, `deleteThreshold?`. Returns `{dir,place,services,instances,files}`. See [mirror-basics](mirror-basics.md).
+`dir`, `services?`, `deleteThreshold?`. Returns `{dir,place,services,instances,files}`, plus `earlierRunMovedTo` and `foreignFiles`/`foreignNote` when they apply. See [mirror-basics](mirror-basics.md).
 
 ```call
 mirror_start {"dir":"D:/work/mirror","services":["Workspace","StarterGui"]}

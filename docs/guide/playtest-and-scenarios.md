@@ -48,6 +48,29 @@ playtest_scenario {"source":"T.step('player exists', function() T.assert(T.playe
 
 In scope: `T`, `print`, `warn`, `args`, `plugin`, and all normal globals. A `return` value comes back as `returns`.
 
+### A scenario is not one of the game's scripts
+
+The scenario runs in the RoLink plugin, apart from the game's scripts. **`require` of a game ModuleScript gives the scenario its own, separate copy of that module.** Tables, flags, counters and connections inside it are not the game's: reading them shows the copy's state, and changing them does not reach the game. The report then carries a `warnings` entry naming the module.
+
+Reach game state through what the game's scripts and the scenario both see:
+
+| To | Use |
+|---|---|
+| Read state | Instances, attributes (`player:GetAttribute("Gold")`), `Value` objects the game keeps up to date |
+| Change state | Set attributes or `Value` objects the game listens to, or move instances |
+| Call game code | A `BindableEvent` / `BindableFunction` the game exposes, or fire the game's own remotes from a client scenario |
+
+Pure helpers and constants from a module are fine to `require`.
+
+```lua
+-- the game keeps Gold as an attribute and listens to a BindableFunction "Debug/GiveGold"
+T.step("debug gold", function()
+  local player = T.player()
+  game:GetService("ServerStorage").Debug.GiveGold:Invoke(player, 10)
+  T.waitFor(function() return player:GetAttribute("Gold") == 10 end, 5, "gold to reach 10")
+end)
+```
+
 ### Example
 
 ```lua
@@ -96,6 +119,7 @@ end)
 | `logsDropped` | How many lines were cut |
 | `errors` | Error lines with `stack`, `script`, `step` |
 | `output` | `{from, lastSeq}`, for continuing with `output_read` |
+| `warnings` | Present when the scenario did something that does not do what it looks like, such as requiring a game ModuleScript |
 
 A game script's error does not fail a step. Look at `errors`, or assert on it.
 
@@ -138,12 +162,14 @@ playtest_scenario {"context":"client","client":2,"source":"T.step('second window
 
 ## What cannot be simulated
 
-Real keyboard, mouse, touch or gamepad input cannot be injected. Move the character with `T.teleport`, or `humanoid:MoveTo` from a server or client scenario. Fire remotes and call modules directly. See [limits-and-known-gaps](limits-and-known-gaps.md).
+Real keyboard, mouse, touch or gamepad input cannot be injected. Move the character with `T.teleport`, or `humanoid:MoveTo` from a server or client scenario. Fire remotes, or invoke bindables the game exposes. Calling into a game module through `require` reaches the scenario's own copy, not the game (see above). See [limits-and-known-gaps](limits-and-known-gaps.md).
 
 ## Gotchas
 
 - A scenario blocks other queued commands for that context, except `output_read`, `playtest_status`, `perf_stats` and `profile_scripts`.
 - `T.waitFor` swallows errors in the predicate, so a typo looks like a timeout. Read the `last error` part of the message.
 - A scenario may be cut off when the test ends. The error says the play-test ended, so check `output_read`.
+- A slow or unfocused Studio (around 10 fps) runs scenarios slowly. A context busy with a scenario is not dropped for polling late, but the scenario's own `timeout` and the `T.waitFor` timeouts still count wall time: give them room.
+- `screenshot` during a test: use `context:"client"` for what the player sees. The edit view is hidden while a test runs, and the server view only shows when the user switches Studio to it; a capture of a context that is not on screen fails with a message instead of returning a wrong image. See [editor-tools](editor-tools.md).
 - Mode `run` has no players or client context.
 - Output from `print` in a scenario also appears in Studio's Output window.

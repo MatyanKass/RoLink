@@ -72,7 +72,21 @@ screenshot {"view":"current","maxWidth":1920}
 
 Views follow the orientation of a single target's pivot. "Whole Workspace" skips Terrain, the Camera, a part named Baseplate, and very large flat parts.
 
-Studio must not be covered in a way that blocks capture. A minimised window is restored first. The notes in the result say so if the viewport markers were not found and the whole window came back.
+Studio must not be covered in a way that blocks capture. A minimised window is restored first. In edit mode with no test running, a note in the result says so if the viewport markers were not found and the whole window came back.
+
+### During a play-test
+
+Studio shows one view of a running test: normally the client, or the server when the user switches to it. The edit-mode viewport is hidden.
+
+| Context | Result |
+|---|---|
+| `client` | The player's view, cropped to the viewport |
+| `server` | Works only while the user has switched Studio to the server view |
+| `edit` (the default) | Fails: the edit view is not on screen. Use `client`, or stop the test |
+
+While a test runs, the other contexts draw their own markers during a capture. A capture that shows another context fails with an error naming the context to use, and a capture with no markers at all fails too. Neither returns the whole window.
+
+In the client, the game's camera scripts move the camera every frame. For an explicit camera (`position`, `cframe`, a view other than `current`, `fov`) the plugin sets it again after every render step until the capture is done, and checks each frame that it held. If the game still won a frame, the result starts with `WARNING: the game's own camera script moved the camera`, and the image may show the game's camera. `view:"current"` captures what the player sees and moves nothing.
 
 GUIs in `StarterGui` appear in the capture, see [gui](gui.md).
 

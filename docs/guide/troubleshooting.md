@@ -17,7 +17,7 @@ Something did not work. Search this topic for the error text.
 | `DUPLICATE of a live session` in `status` | Place open twice, or a program posing as Studio | Close the extra one. If you did not open it twice, investigate |
 | `rejected our token` | Port owned by another user's server | Stop that process |
 | `Studio did not answer "op" within Ns` | Studio busy or stalled | Wait. The work may still finish, so check before retrying |
-| `Studio session closed` during a command | Studio closed or reloaded | Reconnect and check state |
+| `Studio session closed` during a command | Studio closed or reloaded | Reconnect and check state. A session running a long command is no longer dropped for polling late |
 | HTTP prompt keeps blocking | Permission denied earlier | Allow it in Studio's Plugin Management, then reopen the place |
 | Writing scripts fails | Script injection permission denied | Allow it in Plugin Management |
 | `could not load class table` in the panel | API dump unavailable | Give the server internet once, then reconnect |
@@ -40,7 +40,10 @@ Something did not work. Search this topic for the error text.
 | `UnionOperation needs a "csg" recipe` | Hand-written union | Add `csg` |
 | `cannot create class 'X'` | Not creatable or misspelled | Check the class name |
 | A second instance appeared | A folder made for an existing loose instance | Delete the extra. See [mirror-basics](mirror-basics.md) |
-| Disk edits lost | Studio reconnected | Studio wins on reconnect |
+| `WARNING (mirror): ... NOT in Studio yet` | An apply failed or Studio is gone | Wait for the reconnect; the edits are applied then. If the bound Studio is closed, copy them, then `mirror_stop` and `mirror_start` |
+| `mirror conflict on <file>` | Studio and you changed the same file while it was unreachable | Studio's version is in the file; yours is in `.rolink-conflicts/`. Merge by hand |
+| `KEPT <file>: this file was not written by the mirror` | Your own file where an instance's file belongs | Move or delete it; the mirror then writes its file |
+| `.git` or other files in `.rolink-trash/` | Started with a version before ownership tracking | Move them back by hand; current versions never trash files they did not write, and never delete that old trash |
 | `mirror and sync cannot run on the same content` | Overlapping services | Stop one |
 | `a mirror is already running` | One at a time | `mirror_stop` |
 

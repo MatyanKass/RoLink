@@ -225,6 +225,26 @@ do
 	check(H.serde.decode("json", H.serde.encode("json", rep)).ok == true, "report is JSON-encodable")
 end
 
+do -- a game ModuleScript required by a scenario is the plugin's own copy: the report says so
+	local run = newScenario()
+	local storage = H.game:GetService("ReplicatedStorage")
+	local mod = roblox.Instance.new("ModuleScript")
+	mod.Name = "GameState"
+	mod.Parent = storage
+	local loose = roblox.Instance.new("ModuleScript")
+	local rep = run([[
+		T.step("game module", function() pcall(require, args.mod) end)
+		T.step("again", function() pcall(require, args.mod) end)
+		T.step("loose", function() pcall(require, args.loose) end)
+	]], { args = { mod = mod, loose = loose } })
+	check(type(rep.warnings) == "table" and #rep.warnings == 1, "one warning per game module: " .. tostring(rep.warnings and #rep.warnings))
+	check(rep.warnings and string.find(rep.warnings[1], "ReplicatedStorage.GameState", 1, true) ~= nil, "names the module")
+	check(rep.warnings and string.find(rep.warnings[1], "attributes", 1, true) ~= nil, "says what to use instead")
+	local plain = run([[T.step("none", function() end)]])
+	check(plain.warnings == nil, "no warning without a require")
+	mod:Destroy()
+end
+
 do -- a failing step must not stop the rest
 	local run = newScenario()
 	local rep = run([[
