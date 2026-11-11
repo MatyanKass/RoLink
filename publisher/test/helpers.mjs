@@ -257,6 +257,8 @@ export function doneOp(moderationState = "MODERATION_STATE_REVIEWING", extra = {
 // ------------------------------------------------------------------ RoLink stand-in
 
 /** Real HTTP server speaking RoLink's /health and /rpc, with a tiny instance model. */
+import { tokenFile as tokenPath } from "../dist/rolink.js";
+
 export async function fakeRoLink({ online = true } = {}) {
   const rl = {
     online,
@@ -329,8 +331,9 @@ export async function fakeRoLink({ online = true } = {}) {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   rl.port = server.address().port;
-  const tokenFile = path.join(os.tmpdir(), `rolink-${rl.port}.token`);
-  fs.writeFileSync(tokenFile, token);
+  const tokenFile = tokenPath(rl.port);
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 });
   rl.close = () =>
     new Promise((r) => {
       fs.rmSync(tokenFile, { force: true });

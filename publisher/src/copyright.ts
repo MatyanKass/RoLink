@@ -83,7 +83,9 @@ export function providersFromEnv(env: NodeJS.ProcessEnv, fetchImpl: Fetch): Copy
 
 /** Provider text ends up in a phrase the user must retype, so it is kept plain. */
 export function cleanTitle(raw: string): string {
-  return raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "Unknown title";
+  // invisible and bidi characters would make the phrase untypeable, or show text other than what must be typed
+  const plain = raw.normalize("NFC").replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/[\p{Cf}\p{Cs}]/gu, "");
+  return Array.from(plain.replace(/\s+/g, " ").trim()).slice(0, 120).join("").trim() || "Unknown title";
 }
 
 export async function runCopyrightCheck(

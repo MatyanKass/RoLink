@@ -19,6 +19,39 @@ function matches(s: StudioSession, place: string) {
   return s.placeName.toLowerCase().includes(place.toLowerCase()) || String(s.placeId) === place;
 }
 
+/** Same rule as RoLink's bridge: the user's temp folder on Windows, a private folder elsewhere. */
+export function tokenDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return os.tmpdir();
+  return env.XDG_RUNTIME_DIR ? path.join(env.XDG_RUNTIME_DIR, "rolink") : path.join(os.homedir(), ".rolink");
+}
+
+export function tokenFile(port: number, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  return path.join(tokenDir(env, platform), `rolink-${port}.token`);
+}
+
+type StatLike = Pick<fs.Stats, "uid" | "mode" | "isFile">;
+
+/**
+ * POSIX: a token file planted by another local user would send our calls under their
+ * token, so the file must be a regular file and it and its folder private to this user.
+ */
+export function tokenFileTrusted(file: StatLike, dir: StatLike, uid: number | undefined, platform: NodeJS.Platform = process.platform): boolean {
+  if (!file.isFile()) return false;
+  if (platform === "win32" || uid === undefined) return true;
+  return [file, dir].every((st) => st.uid === uid && (st.mode & 0o077) === 0);
+}
+
+export function readToken(port: number, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | undefined {
+  try {
+    const f = tokenFile(port, env, platform);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!tokenFileTrusted(fs.lstatSync(f), fs.lstatSync(path.dirname(f)), uid, platform)) return undefined;
+    return fs.readFileSync(f, "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class StudioOffline extends Error {}
 
 export class RoLinkClient {
@@ -54,11 +87,7 @@ export class RoLinkClient {
 
   private token(): string {
     // re-read every call: the server writes a fresh token each time it starts
-    try {
-      return fs.readFileSync(path.join(os.tmpdir(), `rolink-${this.port}.token`), "utf8").trim();
-    } catch {
-      return "";
-    }
+    return readToken(this.port) ?? "";
   }
 
   /** Calls a RoLink tool and returns its JSON result. */

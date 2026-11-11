@@ -35,6 +35,17 @@ export const ANIMATION_ROOT_NOTE =
 const NO_UNIVERSE_NOTE =
   "Experience access: none, because no experience is known (pass universeId, set ROBLOX_UNIVERSE_ID, or publish the open place). The asset may not play in your game until you grant it access.";
 
+/** What a person types can differ from the stored phrase in Unicode form and spacing only. */
+export function samePhrase(typed: string, phrase: string): boolean {
+  const norm = (x: string) => x.normalize("NFC").replace(/\s+/g, " ").trim();
+  return norm(typed) === norm(phrase);
+}
+
+/** Own entries only: an id such as "__proto__" or "constructor" must not find anything. */
+function preparedById(prepares: Record<string, Prepared>, prepareId: unknown): Prepared | undefined {
+  return typeof prepareId === "string" && Object.hasOwn(prepares, prepareId) ? prepares[prepareId] : undefined;
+}
+
 function phrasesFor(kind: AssetKind, copyright: CopyrightResult): string[] {
   if (copyright.status === "match") return [`Я подтверждаю публикацию: ${copyright.title}`, `I confirm publishing: ${copyright.title}`];
   return AGREE[kind];
@@ -215,22 +226,22 @@ export class Publisher {
   }
 
   async publishAsset(args: { prepareId: string; confirmation: string }) {
-    if (this.deps.store.read().prepares[args.prepareId]?.kind === "animation") throw new Error("This prepareId is an animation: use publish_animation.");
+    if (preparedById(this.deps.store.read().prepares, args.prepareId)?.kind === "animation") throw new Error("This prepareId is an animation: use publish_animation.");
     return this.publishPrepared(args);
   }
 
   async publishAnimation(args: { prepareId: string; confirmation: string }) {
-    const prepared = this.deps.store.read().prepares[args.prepareId];
+    const prepared = preparedById(this.deps.store.read().prepares, args.prepareId);
     if (prepared && prepared.kind !== "animation") throw new Error(`This prepareId is ${prepared.kind === "audio" ? "a sound" : "an image"}: use publish_asset.`);
     return { ...(await this.publishPrepared(args)), note: `The animation is now in Roblox moderation; publish_status shows progress. ${ANIMATION_ROOT_NOTE}` };
   }
 
   private async publishPrepared(args: { prepareId: string; confirmation: string }) {
     const { prepareId } = args;
-    const p = this.deps.store.read().prepares[prepareId];
+    const p = preparedById(this.deps.store.read().prepares, prepareId);
     if (!p) throw new Error(`Unknown prepareId "${prepareId}". Call prepare_asset first.`);
     if (p.usedAt) throw new Error("This prepareId was already used. Call prepare_asset again.");
-    if (!p.acceptedPhrases.includes((args.confirmation ?? "").trim())) {
+    if (!p.acceptedPhrases.some((phrase) => samePhrase(String(args.confirmation ?? ""), phrase))) {
       throw new Error(`Confirmation phrase does not match. Show the summary to the user and wait for them to type exactly: ${p.acceptedPhrases[0]}`);
     }
     const { cloud, creator } = this.publishing();
@@ -267,10 +278,18 @@ export class Publisher {
     }
 
     this.deps.log("uploaded", prepareId, op.path);
-    await this.deps.store.update(prepareId, { status: "processing", operationPath: op.path });
-    await this.deps.poller.processEntry(prepareId, op);
-    const entry = this.deps.store.read().queue.find((q) => q.prepareId === prepareId)!;
-    return { ...this.view(entry), note: "The asset is now in Roblox moderation. publish_status shows progress; a background poller applies it when approved." };
+    const note = "The asset is now in Roblox moderation. publish_status shows progress; a background poller applies it when approved.";
+    try {
+      await this.deps.store.update(prepareId, { status: "processing", operationPath: op.path });
+      await this.deps.poller.processEntry(prepareId, op);
+      const entry = this.deps.store.read().queue.find((q) => q.prepareId === prepareId)!;
+      return { ...this.view(entry), note };
+    } catch (e: any) {
+      // the upload went through: an error here (a locked state file, say) must not read as a failed publish
+      const reason = this.deps.redactor.text(String(e?.message ?? e));
+      this.deps.log("upload accepted, local bookkeeping failed", prepareId, reason);
+      return { prepareId, kind: p.kind, name: p.name, status: "processing", operationPath: op.path, note: `${note} Roblox accepted the upload, but recording it locally failed (${reason}); the poller retries. Do not upload this file again.` };
+    }
   }
 
   private view(e: QueueEntry) {

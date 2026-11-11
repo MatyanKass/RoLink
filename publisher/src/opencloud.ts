@@ -94,7 +94,9 @@ export interface ModerationResult {
   [extra: string]: unknown;
 }
 
-const QUOTA_WORDS = /quota|monthly|upload limit|limit (?:was |has been )?(?:reached|exceeded)|exceeded .*limit|resource.?exhausted/i;
+const QUOTA_WORDS = /quota|monthly|upload limit|resource.?exhausted/i;
+/** Also used for field validation ("description exceeded the limit"), so only a 403/429 makes these a quota. */
+const LIMIT_WORDS = /limit (?:was |has been )?(?:reached|exceeded)|exceeded .*limit/i;
 const MANUAL = "If it keeps failing you may need to upload it yourself in Creator Hub or the Studio Asset Manager.";
 
 function quotaLimit(ctx: CloudContext): string {
@@ -119,7 +121,7 @@ function explain(ctx: CloudContext, status: number, message: string, retryAfter?
     if (status >= 500) return new CloudError(`${call.what} failed: Open Cloud server error (HTTP ${status}).${detail}`, "server", undefined, status);
     return new CloudError(`${call.what} was refused (HTTP ${status}).${detail}`, "invalid", undefined, status);
   }
-  if (QUOTA_WORDS.test(message)) {
+  if (QUOTA_WORDS.test(message) || ((status === 403 || status === 429) && LIMIT_WORDS.test(message))) {
     return new CloudError(`Upload refused: your Roblox upload quota is used up.${detail} ${quotaLimit(ctx)}${retry} ${MANUAL}`, "quota", retryAfter);
   }
   if (status === 429) {
