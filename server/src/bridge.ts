@@ -29,6 +29,8 @@ export interface SessionInfo {
   lastSeen: number;
   /** a later session for a place that was already live: receives no commands */
   duplicate?: boolean;
+  /** running a command right now (a scenario can hold a slow Studio for minutes) */
+  busy?: boolean;
 }
 
 interface Pending {
@@ -256,10 +258,15 @@ export class Bridge extends EventEmitter {
     sendJson(res, 200, { commands: s.queue.splice(0) });
   }
 
+  /**
+   * Drops sessions that stopped polling. One with a command in flight is not dropped for
+   * that: a slow or unfocused Studio running a long scenario may not poll for a while, and
+   * the command's own timeout already ends the wait if Studio is really gone.
+   */
   private reap() {
     const now = Date.now();
     for (const s of this.sessions.values()) {
-      if (now - s.lastSeen > SESSION_TTL_MS && !s.waiter) this.drop(s, "timed out");
+      if (now - s.lastSeen > SESSION_TTL_MS && !s.waiter && s.pending.size === 0) this.drop(s, "timed out");
     }
   }
 
@@ -517,7 +524,8 @@ function publicInfo(s: Session | SessionInfo): SessionInfo {
   const { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen } = s;
   // a flag, not the other session's id: ids are the plugin routes' only credential
   const duplicate = "duplicateOf" in s && s.duplicateOf ? { duplicate: true } : {};
-  return { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen, ...duplicate };
+  const busy = "pending" in s && s.pending.size > 0 ? { busy: true } : {};
+  return { id, context, placeName, placeId, gameId, pluginVersion, connectedAt, lastSeen, ...duplicate, ...busy };
 }
 
 const MAX_BODY = 64 * 1024 * 1024; // results and large events are chunked at ~700 KB; import_model sends only paths

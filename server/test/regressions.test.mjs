@@ -201,6 +201,26 @@ test("mirror edits made while the bound Studio is gone are kept, reported on eve
   fs.rmSync(path.dirname(dir), { recursive: true, force: true });
 });
 
+test("a session busy with a long scenario is not dropped for not polling (field report: Studio session closed (timed out))", async () => {
+  const sid = await postJson("/plugin/hello", { context: "client", placeName: "Slow", placeId: ++placeSeq, gameId: 2, pluginVersion: "t" }).then((b) => b.session);
+  // Studio takes the command, then (slow, unfocused) does not poll again for longer than the TTL
+  const running = bridge.send(sid, "playtest_scenario", { source: "" }, 120_000);
+  const first = await (await fetch(`${BASE}/plugin/poll?s=${sid}`)).json();
+  const cmd = first.commands.find((c) => c.op === "playtest_scenario");
+  assert.ok(cmd);
+  const s = bridge.sessions.get(sid);
+  s.lastSeen -= 10 * 60_000;
+  bridge.reap();
+  assert.ok(bridge.sessions.has(sid), "kept while its command runs");
+  assert.equal(bridge.list().find((x) => x.id === sid).busy, true);
+  await postJson("/plugin/result", { s: sid, id: cmd.id, ok: true, result: { ok: true, summary: "1/1" } });
+  assert.deepEqual(await running, { ok: true, summary: "1/1" });
+  // idle and silent: dropped as before
+  s.lastSeen -= 10 * 60_000;
+  bridge.reap();
+  assert.ok(!bridge.sessions.has(sid), "an idle silent session still times out");
+});
+
 test("mirror_stop names the edits that never reached Studio", async () => {
   const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
   const sid = await hello("Gone", ++placeSeq);

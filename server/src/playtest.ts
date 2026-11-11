@@ -39,7 +39,8 @@ export class Playtests {
 
   private live(context: Context, place?: string): SessionInfo[] {
     const now = Date.now();
-    let list = this.bridge.list().filter((s) => s.context === context && now - s.lastSeen <= LIVE_WINDOW_MS);
+    // a session busy with a long command (a scenario on a slow Studio) may not poll meanwhile
+    let list = this.bridge.list().filter((s) => s.context === context && (s.busy || now - s.lastSeen <= LIVE_WINDOW_MS));
     if (place) {
       const p = place.toLowerCase();
       list = list.filter((s) => s.placeName.toLowerCase().includes(p) || String(s.placeId) === place);
