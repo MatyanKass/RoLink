@@ -334,6 +334,189 @@ test("a non-empty folder that is not a mirror is refused", async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// ---------------------------------------------------------------- ownership: only what the mirror wrote
+
+function userFiles(dir) {
+  fs.mkdirSync(path.join(dir, ".git", "refs"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/master\n");
+  fs.writeFileSync(path.join(dir, ".gitignore"), ".rolink-*\n");
+  fs.mkdirSync(path.join(dir, ".docs"), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".docs", "x.md"), "notes\n");
+  fs.writeFileSync(path.join(dir, "README.md"), "# my place\n");
+  fs.mkdirSync(path.join(dir, "Workspace"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "Workspace", "notes.md"), "todo\n");
+}
+function assertUserFiles(dir) {
+  assert.equal(fs.readFileSync(path.join(dir, ".git", "HEAD"), "utf8"), "ref: refs/heads/master\n");
+  assert.ok(fs.existsSync(path.join(dir, ".git", "refs")));
+  assert.equal(fs.readFileSync(path.join(dir, ".gitignore"), "utf8"), ".rolink-*\n");
+  assert.equal(fs.readFileSync(path.join(dir, ".docs", "x.md"), "utf8"), "notes\n");
+  assert.equal(fs.readFileSync(path.join(dir, "README.md"), "utf8"), "# my place\n");
+  assert.equal(fs.readFileSync(path.join(dir, "Workspace", "notes.md"), "utf8"), "todo\n");
+}
+function trashed(dir) {
+  const out = [];
+  const walk = (rel) => {
+    for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const r = `${rel}/${e.name}`;
+      if (e.isDirectory()) walk(r);
+      else out.push(r);
+    }
+  };
+  if (fs.existsSync(path.join(dir, ".rolink-trash"))) walk(".rolink-trash");
+  return out;
+}
+const SERVICES = ["Workspace", "ReplicatedStorage", "StarterGui"];
+
+test("restarting on an earlier mirror moves only files the mirror wrote (field report: .git went to the trash)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const studio = place();
+  try {
+    const first = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, studio.send, "P");
+    await first.start();
+    await first.stop();
+    userFiles(dir);
+    fs.writeFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), '{"Color":"#ABCDEF"}');
+    const again = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, studio.send, "P");
+    const r = await again.start();
+    try {
+      assertUserFiles(dir);
+      const t = trashed(dir);
+      assert.ok(t.some((x) => /^\.rolink-trash\/run-[^/]+\/Workspace\/Baseplate\.Part\.json$/.test(x)), t.join("\n"));
+      assert.ok(!t.some((x) => /HEAD|gitignore|README|notes|x\.md/.test(x)), `only mirror files are trashed:\n${t.join("\n")}`);
+      assert.ok(fs.readFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), "utf8").includes("CFrame"), "a fresh copy is written");
+      assert.deepEqual(again.status().foreignFiles, ["Workspace/notes.md"]);
+      assert.match(r.foreignNote, /not written by the mirror/);
+      const manifest = JSON.parse(fs.readFileSync(path.join(dir, ".rolink-mirror.json"), "utf8"));
+      assert.ok(manifest.files.includes("Workspace/Baseplate.Part.json"));
+      assert.ok(!manifest.files.some((x) => x.includes("notes") || x.startsWith(".")));
+      // a third start: the user's files still stay
+      await again.stop();
+      const third = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, studio.send, "P");
+      await third.start();
+      await third.stop();
+      assertUserFiles(dir);
+    } finally {
+      await again.stop();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a mirror from before the manifest: only mirror-named files in service folders move", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  try {
+    fs.writeFileSync(path.join(dir, ".rolink-mirror.json"), JSON.stringify({ place: "P", startedAt: "2026-01-01T00:00:00Z" }));
+    userFiles(dir);
+    fs.writeFileSync(path.join(dir, "Workspace", "Old.Part.json"), "{}");
+    fs.mkdirSync(path.join(dir, "Workspace", "Mine"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "Workspace", "Mine", "plan.txt"), "keep\n");
+    fs.mkdirSync(path.join(dir, "Tools"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "Tools", "build.luau"), "-- not a service\n");
+    const m = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, place().send, "P");
+    await m.start();
+    try {
+      assertUserFiles(dir);
+      assert.equal(fs.readFileSync(path.join(dir, "Workspace", "Mine", "plan.txt"), "utf8"), "keep\n");
+      assert.equal(fs.readFileSync(path.join(dir, "Tools", "build.luau"), "utf8"), "-- not a service\n");
+      assert.ok(!fs.existsSync(path.join(dir, "Workspace", "Old.Part.json")), "an old mirror file moved");
+      assert.ok(trashed(dir).some((x) => x.endsWith("Workspace/Old.Part.json")));
+      assert.deepEqual(m.status().foreignFiles, ["Workspace/Mine/plan.txt", "Workspace/notes.md"]);
+    } finally {
+      await m.stop();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a folder holding only dot-entries (a fresh git repository) is accepted and left alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".git"));
+    fs.writeFileSync(path.join(dir, ".git", "HEAD"), "x");
+    fs.writeFileSync(path.join(dir, ".gitignore"), "y");
+    const m = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, place().send, "P");
+    await m.start();
+    await m.stop();
+    assert.equal(fs.readFileSync(path.join(dir, ".git", "HEAD"), "utf8"), "x");
+    assert.equal(fs.readFileSync(path.join(dir, ".gitignore"), "utf8"), "y");
+    assert.ok(fs.existsSync(path.join(dir, "Workspace", "Baseplate.Part.json")));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a file the mirror did not write is never overwritten, even where the mirror wants to write", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const studio = place();
+  try {
+    fs.writeFileSync(path.join(dir, ".rolink-mirror.json"), JSON.stringify({ version: 2, files: [], dirs: [] }));
+    fs.mkdirSync(path.join(dir, "Workspace"));
+    fs.writeFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), "mine, not JSON");
+    const m = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, studio.send, "P");
+    await m.start();
+    try {
+      assert.equal(fs.readFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), "utf8"), "mine, not JSON");
+      assert.deepEqual(m.status().blockedFiles, ["Workspace/Baseplate.Part.json"]);
+      // editing it does not create a second Baseplate, and it is still not overwritten
+      fs.writeFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), '{"Color":"#000001"}');
+      await sleep(500);
+      assert.equal([...studio.nodes.values()].filter((n) => n.n === "Baseplate").length, 1);
+      assert.equal(fs.readFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), "utf8"), '{"Color":"#000001"}');
+      // once the user moves it away, the mirror's own file appears
+      fs.rmSync(path.join(dir, "Workspace", "Baseplate.Part.json"));
+      await until(() => fs.existsSync(path.join(dir, "Workspace", "Baseplate.Part.json")), "the mirror writes its file");
+      assert.ok(fs.readFileSync(path.join(dir, "Workspace", "Baseplate.Part.json"), "utf8").includes("CFrame"));
+      assert.deepEqual(m.status().blockedFiles, []);
+    } finally {
+      await m.stop();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the manifest cannot point the trash at files outside the mirror's own", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-out-"));
+  try {
+    fs.writeFileSync(path.join(outside, "secret.txt"), "s");
+    userFiles(dir);
+    const rel = path.relative(dir, path.join(outside, "secret.txt")).split(path.sep).join("/");
+    fs.writeFileSync(path.join(dir, ".rolink-mirror.json"), JSON.stringify({ version: 2, files: [rel, ".git/HEAD", ".gitignore", "C:/x", "a/../README.md", "README.md/."], dirs: [".git", ".docs"] }));
+    const m = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, place().send, "P");
+    await m.start();
+    await m.stop();
+    assertUserFiles(dir);
+    assert.equal(fs.readFileSync(path.join(outside, "secret.txt"), "utf8"), "s");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("trash from older versions is never deleted; only the last few mirror generations are kept", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const studio = place();
+  try {
+    fs.mkdirSync(path.join(dir, ".rolink-trash", ".git"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".rolink-trash", ".git", "HEAD"), "rescued");
+    fs.writeFileSync(path.join(dir, ".rolink-mirror.json"), JSON.stringify({ place: "P" }));
+    for (let i = 0; i < 5; i++) {
+      const m = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, studio.send, "P");
+      await m.start();
+      await m.stop();
+    }
+    assert.equal(fs.readFileSync(path.join(dir, ".rolink-trash", ".git", "HEAD"), "utf8"), "rescued");
+    const runs = fs.readdirSync(path.join(dir, ".rolink-trash")).filter((e) => e.startsWith("run-"));
+    assert.ok(runs.length <= 3 && runs.length > 0, runs.join(", "));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------- deltas split across events
 
 const part = (i, p) => ({ i, p, c: "Part", n: `P${i}`, props: { CFrame: CF(0), Size: [1, 1, 1] } });
@@ -523,25 +706,123 @@ async function withFlakyMirror(wrap, fn) {
   }
 }
 
-test("a failed mirror_apply reloads from Studio, so a local delete does not stick", () =>
+test("a failed mirror_apply keeps a local delete on disk and applies it once Studio is reloaded", () =>
   withFlakyMirror(failNextApply, async ({ m, studio, f, read }) => {
-    const before = m.status().instances;
     assert.equal(studio.dumps, 1);
     fs.rmSync(f("Workspace", "Baseplate.Part.json"));
     await until(() => studio.dumps === 2, "reloaded after the failure");
-    await until(() => fs.existsSync(f("Workspace", "Baseplate.Part.json")), "file back, as Studio still has it");
-    assert.equal(m.status().instances, before);
+    await until(() => studio.find("Baseplate") === undefined, "the delete reached Studio after the reload");
+    await sleep(150);
+    assert.ok(!fs.existsSync(f("Workspace", "Baseplate.Part.json")), "the file was never written back");
     assert.match(errorsLog(read), /could not apply/);
+    assert.equal(m.status().unappliedCount, 0);
+    assert.ok(m.takeAlerts().some((a) => /reached Studio/.test(a)), "the agent is told the kept edit landed");
   }));
 
-test("a failed mirror_apply puts a new instance's file state back in line with Studio", () =>
-  withFlakyMirror(failNextApply, async ({ m, studio, f }) => {
-    const before = m.status().instances;
+test("a failed mirror_apply keeps a new script and creates it once Studio is reloaded", () =>
+  withFlakyMirror(failNextApply, async ({ studio, f, read }) => {
     fs.writeFileSync(f("ReplicatedStorage", "New.server.luau"), "print(1)\n");
     await until(() => studio.dumps === 2, "reloaded");
-    assert.equal(studio.find("New"), undefined);
-    assert.equal(m.status().instances, before);
+    await until(() => studio.find("New")?.src === "print(1)\n", "created after the reload");
+    assert.equal(read("ReplicatedStorage", "New.server.luau"), "print(1)\n");
   }));
+
+// Studio that can drop off the bridge, the way a reconnect or a reloaded plugin does
+function switchable(studio) {
+  studio.offline = false;
+  studio.dumps = 0;
+  return async (op, args) => {
+    if (studio.offline) throw new Error('The Studio session for "Place1" (place 0) is no longer connected.');
+    if (op === "mirror" && args.action === "start") studio.dumps++;
+    return studio.send(op, args);
+  };
+}
+
+test("edits made while Studio is unreachable are never overwritten, are reported, and land after it is back (field report)", () =>
+  withFlakyMirror(switchable, async ({ m, studio, f, read }) => {
+    m.takeAlerts();
+    studio.offline = true;
+    fs.writeFileSync(f("ReplicatedStorage", "Util.luau"), "return 2\n");
+    await until(() => m.status().waitingForStudio, "the failed apply is noticed");
+    await sleep(300); // the queued reload fails too
+    assert.equal(read("ReplicatedStorage", "Util.luau"), "return 2\n", "the edit is not overwritten by the reload");
+    // a second edit while Studio is still gone is held, not sent and not overwritten
+    fs.writeFileSync(f("ReplicatedStorage", "Util.luau"), "return 3\n");
+    fs.writeFileSync(f("Workspace", "Baseplate.Part.json"), JSON.stringify({ Color: "#010203" }));
+    await until(() => m.status().unappliedEdits.some((u) => u.file === "Workspace/Baseplate.Part.json"), "the second batch is listed");
+    await sleep(300);
+    assert.equal(read("ReplicatedStorage", "Util.luau"), "return 3\n");
+    assert.ok(m.status().unappliedEdits.some((u) => u.file === "ReplicatedStorage/Util.luau"));
+    assert.match(m.pendingWarning() ?? "", /NOT in Studio/);
+    assert.ok(m.takeAlerts().some((a) => /NOT in Studio/.test(a)), "a one-time alert for the agent");
+    assert.equal(studio.find("Util").src, "return 1\n", "nothing reached Studio while it was gone");
+
+    studio.offline = false;
+    await m.resync(); // what Core does when the bound Studio reconnects
+    await until(() => studio.find("Util").src === "return 3\n", "the latest edit reached Studio");
+    await until(() => studio.find("Baseplate").props.Color === "#010203", "the held edit reached Studio");
+    await until(() => m.status().unappliedCount === 0, "nothing left waiting");
+    assert.equal(m.pendingWarning(), null);
+    assert.equal(m.status().conflicts.length, 0, "no conflict: Studio had not changed those files");
+    assert.equal(read("ReplicatedStorage", "Util.luau"), "return 3\n");
+  }));
+
+test("an edit that Studio also changed while unreachable is a conflict: Studio wins, the agent's copy is kept and reported", () =>
+  withFlakyMirror(switchable, async ({ m, studio, f, dir, read }) => {
+    m.takeAlerts();
+    studio.offline = true;
+    fs.writeFileSync(f("ReplicatedStorage", "Util.luau"), "return 'agent'\n");
+    await until(() => m.status().waitingForStudio, "failed apply");
+    studio.find("Util").src = "return 'studio'\n";
+    studio.offline = false;
+    await m.resync();
+    await until(() => read("ReplicatedStorage", "Util.luau") === "return 'studio'\n", "Studio's version is on disk");
+    const c = m.status().conflicts;
+    assert.equal(c.length, 1);
+    assert.equal(c[0].file, "ReplicatedStorage/Util.luau");
+    assert.equal(fs.readFileSync(path.join(dir, ...c[0].kept.split("/")), "utf8"), "return 'agent'\n", "the agent's version is kept");
+    assert.ok(c[0].kept.startsWith(".rolink-conflicts/"));
+    assert.ok(m.takeAlerts().some((a) => /conflict/.test(a) && a.includes(c[0].kept)));
+    await sleep(400);
+    assert.equal(studio.find("Util").src, "return 'studio'\n", "the conflicting edit is not pushed over Studio's");
+    assert.equal(m.status().unappliedCount, 0);
+  }));
+
+test("a file the agent edited is kept when Studio removes its instance", () =>
+  withFlakyMirror(switchable, async ({ m, studio, f, dir }) => {
+    studio.offline = true;
+    fs.writeFileSync(f("ReplicatedStorage", "Util.luau"), "return 'mine'\n");
+    await until(() => m.status().waitingForStudio, "failed apply");
+    studio.nodes.delete(studio.find("Util").i);
+    studio.offline = false;
+    await m.resync();
+    await until(() => !fs.existsSync(f("ReplicatedStorage", "Util.luau")), "the file follows Studio");
+    const c = m.status().conflicts.find((x) => x.file === "ReplicatedStorage/Util.luau");
+    assert.ok(c, JSON.stringify(m.status().conflicts));
+    assert.equal(fs.readFileSync(path.join(dir, ...c.kept.split("/")), "utf8"), "return 'mine'\n");
+  }));
+
+test("an edit Studio keeps refusing to apply is left on disk and listed, not retried forever", () =>
+  withFlakyMirror(
+    (studio) => {
+      studio.dumps = 0;
+      return async (op, args) => {
+        if (op === "mirror_apply") throw new Error("plugin error: boom");
+        if (op === "mirror" && args.action === "start") studio.dumps++;
+        return studio.send(op, args);
+      };
+    },
+    async ({ m, studio, f, read }) => {
+      fs.writeFileSync(f("ReplicatedStorage", "Util.luau"), "return 9\n");
+      await until(() => m.status().rejectedFiles.includes("ReplicatedStorage/Util.luau"), "given up after the attempts");
+      const dumps = studio.dumps;
+      await sleep(400);
+      assert.equal(studio.dumps, dumps, "no endless retry loop");
+      assert.equal(read("ReplicatedStorage", "Util.luau"), "return 9\n", "the agent's file is left as written");
+      assert.equal(m.status().unappliedCount, 0);
+      assert.ok(m.takeAlerts().some((a) => /failed to apply .* 3 times/.test(a)));
+    },
+  ));
 
 test("a reload that fails halfway keeps the shadow it had", () =>
   withFlakyMirror(

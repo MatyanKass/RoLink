@@ -64,10 +64,20 @@ export const DEFAULT_SERVICES = [
   "MaterialService",
 ];
 
+/** Marker and manifest: which files and directories this mirror wrote (and so owns). */
 const MARKER = ".rolink-mirror.json";
 const TMP_DIR = ".rolink-tmp";
 const TRASH_DIR = ".rolink-trash";
+/** Agent edits that lost to a Studio change, kept instead of overwritten. */
+const CONFLICT_DIR = ".rolink-conflicts";
 const ROOT_FILES = new Set(["AGENTS.md", "_tree.txt", "_errors.log", MARKER]);
+/** Trash generations of earlier runs kept on start; older ones are removed (they hold only mirror-owned files). */
+const KEEP_TRASH_RUNS = 3;
+const TRASH_RUN = /^run-\d{8}T\d{6}/;
+/** An edit whose apply keeps failing while Studio answers is left on disk, listed, and no longer retried. */
+const MAX_APPLY_ATTEMPTS = 3;
+const MAX_FOREIGN_LISTED = 1000;
+const STRUCTURE_FILES = new Set(["_props.json", "model.json", "gui.json"]);
 const MAX_ERROR_LINES = 500;
 const DUMP_TIMEOUT = 120_000;
 /** must outlast the watcher's awaitWriteFinish, or a folder and its files land in separate batches */
@@ -106,6 +116,36 @@ const sha = (s: string) => createHash("sha1").update(s).digest("hex");
 const isUnder = (rel: string, dir: string) => rel.startsWith(dir + "/");
 const dirOf = (rel: string) => (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
 const baseOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
+const stamp = (d = new Date()) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "");
+
+/**
+ * A relative path read from the manifest on disk, which anything can edit: only plain
+ * segments below the root, and never a dot-entry (.git, .rolink-*), are accepted.
+ */
+export function ownedPathOk(rel: unknown): rel is string {
+  if (typeof rel !== "string" || rel.length === 0 || rel.length > 2000) return false;
+  if (/[\\:\0]/.test(rel) || rel.startsWith("/")) return false;
+  return rel.split("/").every((seg) => seg.length > 0 && !seg.startsWith(".") && seg !== "..");
+}
+
+/** A file name the mirror itself could have written inside a service directory. */
+function mirrorFileName(base: string) {
+  return STRUCTURE_FILES.has(base) || parseLooseFile(base) !== null || parseModelFile(base) !== null;
+}
+
+function readText(abs: string): string | null {
+  try {
+    return fs.readFileSync(abs, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+interface Unapplied {
+  since: string;
+  reason: string;
+  attempts: number;
+}
 
 function subtreeSize(n: MNode): number {
   let c = 1;
@@ -178,6 +218,26 @@ export class MirrorSession {
   private refusals: { time: string; reason: string }[] = [];
   private lastHashes = new Map<string, string>();
   private knownSkipped = new Set<string>();
+  /** disk edits not in Studio yet: an apply failed, or Studio was unreachable */
+  private unapplied = new Map<string, Unapplied>();
+  /** agent versions kept in CONFLICT_DIR because Studio's change won */
+  private conflicts: { time: string; file: string; kept?: string; reason: string }[] = [];
+  /** files in service folders the mirror did not write, found at start: left alone */
+  private foreign: string[] = [];
+  private foreignCount = 0;
+  /** files the mirror did not write sitting where it wants to write: never overwritten */
+  private blocked = new Set<string>();
+  /** files to put back from the shadow even though their disk content is not one we wrote */
+  private forceRestore = new Set<string>();
+  /** one-time notices for the agent, delivered with its next tool result */
+  private alerts: string[] = [];
+  /** an apply failed: the shadow may not match Studio, so nothing is written until a dump succeeds */
+  private stale = false;
+  /** the render right after a dump: a file both sides changed is a conflict, and Studio wins it */
+  private reconciling = false;
+  private manifestSig = "";
+  private startedAt = new Date().toISOString();
+  private trashRun?: string;
 
   private watcher?: FSWatcher;
   private pending = new Set<string>();
@@ -213,10 +273,17 @@ export class MirrorSession {
     const res = await this.enqueue(async () => {
       await this.dumpAll();
       await this.render();
+      await this.findForeign();
       return { instances: this.nodes.size, files: this.diskFiles.size };
     });
     await this.startWatcher();
-    return { dir: this.root, place: this.placeName, services: this.roots.map((s) => s.name), ...res };
+    const extra: Record<string, unknown> = {};
+    if (this.trashRun) extra.earlierRunMovedTo = `${TRASH_DIR}/${this.trashRun}`;
+    if (this.foreignCount) {
+      extra.foreignFiles = this.foreign.slice(0, 20);
+      extra.foreignNote = `${this.foreignCount} file(s) in the service folders were not written by the mirror; they are left as they are and not applied to Studio (see mirror_status)`;
+    }
+    return { dir: this.root, place: this.placeName, services: this.roots.map((s) => s.name), ...res, ...extra };
   }
 
   async stop() {
@@ -225,18 +292,34 @@ export class MirrorSession {
     clearTimeout(this.renderTimer);
     await this.watcher?.close();
     await this.q.catch(() => {});
+    await this.writeManifest().catch(() => {});
     try {
       await this.send("mirror", { action: "stop" }, 10_000);
     } catch {}
   }
 
-  /** Studio is the source of truth again: after a reconnect, or an edit it did not take. */
+  /**
+   * Reload from Studio: after a reconnect, or an edit it did not take. A file only Studio
+   * changed is rewritten; a file only the agent changed keeps the agent's version, which is
+   * then applied; a file both changed is a conflict: Studio's version is written and the
+   * agent's is kept in CONFLICT_DIR and reported.
+   */
   resync(why = "after reconnect") {
     return this.enqueue(async () => {
       if (this.stopped) return;
       await this.dumpAll();
-      await this.render();
+      this.stale = false;
+      this.reconciling = true;
+      try {
+        await this.render();
+      } finally {
+        this.reconciling = false;
+      }
       this.note(`resynced from Studio ${why}`);
+      if (this.unapplied.size) {
+        for (const rel of this.unapplied.keys()) this.pending.add(rel);
+        this.schedule();
+      }
     });
   }
 
@@ -251,11 +334,37 @@ export class MirrorSession {
       files: this.diskFiles.size,
       deleteThreshold: this.threshold,
       batchesApplied: this.applied,
+      waitingForStudio: this.stale,
+      unappliedEdits: [...this.unapplied].slice(0, 50).map(([file, u]) => ({ file, ...u })),
+      unappliedCount: this.unapplied.size,
+      conflicts: this.conflicts.slice(-20),
+      foreignFiles: this.foreign.slice(0, 50),
+      foreignCount: this.foreignCount,
+      blockedFiles: [...this.blocked].slice(0, 50),
       refusedDeletes: this.refusals.slice(-10),
       rejectedFiles: [...this.rejected.keys()].slice(0, 50),
       recentErrors: this.errors.slice(-10),
       lastActivity: this.lastActivity,
     };
+  }
+
+  /** Notices the agent has not seen yet; each is handed out once. */
+  takeAlerts(): string[] {
+    return this.alerts.splice(0);
+  }
+
+  /** A standing warning while disk edits are not in Studio, or null. */
+  pendingWarning(): string | null {
+    if (!this.unapplied.size) return null;
+    const list = [...this.unapplied.keys()].slice(0, 5).join(", ");
+    const more = this.unapplied.size > 5 ? ` and ${this.unapplied.size - 5} more` : "";
+    return `${this.unapplied.size} file edit(s) are on disk but NOT in Studio yet (${list}${more}). They are kept and applied when Studio answers again; see mirror_status.`;
+  }
+
+  private alert(msg: string) {
+    const m = clean(msg, 1000);
+    if (!this.alerts.includes(m)) this.alerts.push(m);
+    if (this.alerts.length > 20) this.alerts.splice(0, this.alerts.length - 20);
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -287,20 +396,136 @@ export class MirrorSession {
     if (st && !st.isDirectory()) throw new Error(`mirror dir is a file: ${this.root}`);
     await fsp.mkdir(this.root, { recursive: true });
     const entries = await fsp.readdir(this.root);
-    if (entries.length && !entries.includes(MARKER)) {
+    // dot-entries (.git, .gitignore, .vscode...) never make a folder "not empty": they are never touched
+    if (entries.some((e) => !e.startsWith(".")) && !entries.includes(MARKER)) {
       throw new Error(`${this.root} is not empty and is not a RoLink mirror; pick an empty or new folder`);
     }
-    // files from an earlier run are stale: keep the latest copy aside rather than delete them
-    const old = entries.filter((e) => !e.startsWith(".rolink-") && !ROOT_FILES.has(e));
-    if (old.length) {
-      const trash = path.join(this.root, TRASH_DIR);
-      await fsp.rm(trash, { recursive: true, force: true });
-      await fsp.mkdir(trash, { recursive: true });
-      for (const e of old) await fsp.rename(path.join(this.root, e), path.join(trash, e));
-    }
+    if (entries.includes(MARKER)) await this.retireEarlierRun(entries);
     await fsp.rm(path.join(this.root, TMP_DIR), { recursive: true, force: true });
     await fsp.mkdir(path.join(this.root, TMP_DIR), { recursive: true });
-    await fsp.writeFile(path.join(this.root, MARKER), JSON.stringify({ place: this.placeName, startedAt: new Date().toISOString() }) + "\n");
+    await this.writeManifest(true);
+  }
+
+  /**
+   * Files of an earlier run are stale. Only what that run wrote (its manifest) moves to a
+   * new generation in TRASH_DIR; everything else in the folder stays where it is.
+   */
+  private async retireEarlierRun(entries: string[]) {
+    let manifest: any = null;
+    try {
+      manifest = JSON.parse(await fsp.readFile(path.join(this.root, MARKER), "utf8"));
+    } catch {}
+    const owned = Array.isArray(manifest?.files)
+      ? { files: (manifest.files as unknown[]).filter(ownedPathOk), dirs: (Array.isArray(manifest.dirs) ? (manifest.dirs as unknown[]) : []).filter(ownedPathOk) }
+      : await this.legacyOwned(entries);
+    const run = `run-${stamp()}-${randomUUID().slice(0, 8)}`;
+    const trashRel = `${TRASH_DIR}/${run}`;
+    const dirs = new Set(owned.dirs);
+    const checked = new Set<string>();
+    let moved = 0;
+    for (const rel of owned.files) {
+      try {
+        const st = await fsp.lstat(this.abs(rel));
+        if (!st.isFile()) continue;
+        await this.assertNoSymlink(dirOf(rel) || rel, checked);
+        await fsp.mkdir(this.abs(dirOf(`${trashRel}/${rel}`)), { recursive: true });
+        await fsp.rename(this.abs(rel), this.abs(`${trashRel}/${rel}`));
+        moved++;
+        for (let d = dirOf(rel); d; d = dirOf(d)) dirs.add(d);
+      } catch {}
+    }
+    // directories the mirror made: removed only once empty, so anything else in them keeps them
+    for (const d of [...dirs].sort((a, b) => b.length - a.length)) {
+      try {
+        const st = await fsp.lstat(this.abs(d));
+        if (st.isDirectory()) await fsp.rmdir(this.abs(d));
+      } catch {}
+    }
+    if (moved) {
+      this.trashRun = run;
+      this.note(`moved ${moved} file(s) of the earlier run to ${trashRel}`);
+    }
+    // older generations hold only files a mirror wrote; anything else in TRASH_DIR (from older versions) is kept
+    try {
+      const runs = (await fsp.readdir(this.abs(TRASH_DIR))).filter((e) => TRASH_RUN.test(e)).sort();
+      for (const old of runs.slice(0, Math.max(0, runs.length - KEEP_TRASH_RUNS))) {
+        await fsp.rm(this.abs(`${TRASH_DIR}/${old}`), { recursive: true, force: true });
+      }
+    } catch {}
+  }
+
+  /**
+   * A marker from before the manifest: the files the mirror would have written are those with
+   * a mirror file name inside a service directory. Nothing outside the service directories.
+   */
+  private async legacyOwned(entries: string[]) {
+    const services = new Set([...DEFAULT_SERVICES, ...this.services].map((s) => encodeName(s)));
+    const files: string[] = [];
+    const dirs: string[] = [];
+    const walk = async (rel: string, depth: number) => {
+      if (depth > 64) return;
+      let list: fs.Dirent[];
+      try {
+        list = await fsp.readdir(this.abs(rel), { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of list) {
+        if (e.name.startsWith(".")) continue;
+        const child = `${rel}/${e.name}`;
+        if (e.isDirectory()) {
+          dirs.push(child);
+          await walk(child, depth + 1);
+        } else if (e.isFile() && mirrorFileName(e.name)) files.push(child);
+      }
+    };
+    for (const top of entries) {
+      if (!services.has(top)) continue;
+      const st = await fsp.lstat(this.abs(top)).catch(() => undefined);
+      if (!st?.isDirectory()) continue;
+      dirs.push(top);
+      await walk(top, 0);
+    }
+    return { files, dirs };
+  }
+
+  /** The marker, with what this run owns: a later start moves exactly these and nothing else. */
+  private async writeManifest(force = false) {
+    const files = [...this.diskFiles.keys()].sort();
+    const dirs = [...this.diskDirs].sort();
+    const sig = sha(files.join("\n") + "\0" + dirs.join("\n"));
+    if (!force && sig === this.manifestSig) return;
+    const body = JSON.stringify({ version: 2, place: this.placeName, startedAt: this.startedAt, files, dirs }) + "\n";
+    await this.atomicWrite(MARKER, body);
+    this.manifestSig = sig;
+  }
+
+  /** Files in the service folders that the mirror did not write: listed, never moved. */
+  private async findForeign() {
+    const found: string[] = [];
+    let count = 0;
+    const walk = async (rel: string, depth: number) => {
+      if (depth > 64) return;
+      let list: fs.Dirent[];
+      try {
+        list = await fsp.readdir(this.abs(rel), { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of list) {
+        if (e.name.startsWith(".")) continue;
+        const child = `${rel}/${e.name}`;
+        if (e.isDirectory()) await walk(child, depth + 1);
+        else if (!this.diskFiles.has(child)) {
+          count++;
+          if (found.length < MAX_FOREIGN_LISTED) found.push(child);
+        }
+      }
+    };
+    for (const s of this.roots) await walk(encodeName(s.name), 0);
+    this.foreign = found.sort();
+    this.foreignCount = count;
+    if (count) this.note(`${count} file(s) in the service folders were not written by the mirror; left as they are`);
   }
 
   private async startWatcher() {
@@ -556,8 +781,25 @@ export class MirrorSession {
     }
   }
 
+  /** Keeps an agent's version of a file that Studio's version replaces or removes. */
+  private keepConflict(rel: string, text: string, reason: string) {
+    const kept = `${CONFLICT_DIR}/${stamp()}/${rel}`;
+    fs.mkdirSync(path.dirname(this.abs(kept)), { recursive: true });
+    fs.writeFileSync(this.abs(kept), text, "utf8");
+    this.conflicts.push({ time: new Date().toISOString(), file: rel, kept, reason });
+    if (this.conflicts.length > 200) this.conflicts.splice(0, this.conflicts.length - 200);
+    this.logError(`CONFLICT ${rel}: ${reason}; your version is kept at ${kept}`);
+    this.alert(`mirror conflict on ${rel}: ${reason}. Studio's version is in the file now; your version is kept at ${kept}. Re-apply what you still need.`);
+    return kept;
+  }
+
   private async render() {
     if (this.stopped && this.diskFiles.size) return;
+    if (this.stale) {
+      // the shadow may not match Studio after a failed apply: write nothing from it until a dump succeeds
+      await this.writeRootFiles();
+      return;
+    }
     const layout = this.computeLayout();
     for (const s of layout.skipped) {
       if (!this.knownSkipped.has(s)) {
@@ -572,6 +814,12 @@ export class MirrorSession {
       if (layout.files.has(rel) || this.rejected.has(rel)) continue;
       try {
         await this.assertNoSymlink(dirOf(rel) || baseOf(rel), checked);
+        const now = readText(this.abs(rel));
+        if (now !== null && sha(now) !== this.diskFiles.get(rel) && !this.forceRestore.has(rel)) {
+          // the agent edited it after our last write: keep that edit before the file goes
+          this.keepConflict(rel, now, "Studio removed or renamed this instance after you edited its file");
+          this.unapplied.delete(rel);
+        }
         await fsp.rm(this.abs(rel), { force: true });
         this.diskFiles.delete(rel);
       } catch (e: any) {
@@ -596,47 +844,103 @@ export class MirrorSession {
         this.logError(`could not create ${d}: ${e.message}`);
       }
     }
+    for (const rel of [...this.blocked]) if (!fs.existsSync(this.abs(rel))) this.blocked.delete(rel);
     const writes: [string, string, string][] = [];
     for (const [rel, unit] of layout.files) {
       const h = sha(unit.content);
       if (this.diskFiles.get(rel) === h) continue;
       if (this.rejected.has(rel)) continue; // keep the agent's broken file so it can be fixed
+      if (this.blocked.has(rel)) continue; // not ours: never overwritten
       writes.push([rel, unit.content, h]);
     }
+    let written = 0;
     for (let i = 0; i < writes.length; i += 32) {
       await Promise.all(
         writes.slice(i, i + 32).map(async ([rel, text, h]) => {
+          const known = this.diskFiles.get(rel);
           try {
             await this.assertNoSymlink(dirOf(rel), checked);
-            const known = this.diskFiles.get(rel);
+            const force = this.forceRestore.has(rel);
+            let outcome: "written" | "foreign" | "agent" | "same" | "conflict" | "restored" = "written";
+            let conflictText = "";
+            // runs right before the rename: decides from what is on disk at that moment
             const replaced = await this.atomicWrite(rel, text, () => {
-              if (known !== undefined) {
-                let now: string | null = null;
-                try {
-                  now = fs.readFileSync(this.abs(rel), "utf8");
-                } catch {}
-                if (now !== null && sha(now) !== known) return false;
+              outcome = "written";
+              const now = readText(this.abs(rel));
+              if (now === null) {
+                // the agent deleted a file Studio has changed meanwhile: Studio's version comes back
+                if (this.reconciling && known !== undefined && !force) outcome = "restored";
+              } else if (!force) {
+                const nowHash = sha(now);
+                if (known === undefined) {
+                  if (nowHash === h) {
+                    this.diskFiles.set(rel, h);
+                    outcome = "same";
+                    return false;
+                  }
+                  outcome = "foreign";
+                  return false;
+                }
+                if (nowHash !== known) {
+                  if (nowHash === h) {
+                    this.diskFiles.set(rel, h);
+                    outcome = "same";
+                    return false;
+                  }
+                  if (!this.reconciling) {
+                    outcome = "agent";
+                    return false;
+                  }
+                  outcome = "conflict";
+                  conflictText = now;
+                }
               }
+              if (outcome === "conflict") this.keepConflict(rel, conflictText, "Studio changed this file while your edit to it was not applied");
               this.diskFiles.set(rel, h); // before the rename, so its watcher event is recognised
               return true;
             });
-            if (!replaced) {
+            const o = outcome as string;
+            if (replaced) {
+              written++;
+              this.forceRestore.delete(rel);
+              if (o === "conflict") this.unapplied.delete(rel);
+              if (o === "restored") {
+                this.unapplied.delete(rel);
+                this.conflicts.push({ time: new Date().toISOString(), file: rel, reason: "you deleted this file, but Studio changed the instance meanwhile; Studio's version was written back" });
+                this.logError(`CONFLICT ${rel}: deleted on disk but changed in Studio; Studio's version was written back`);
+                this.alert(`mirror conflict on ${rel}: you deleted it while Studio changed the instance; Studio's version was written back. Delete it again if you still mean it.`);
+              }
+            } else if (o === "agent") {
               // an agent saved this file since we last wrote it: its edit wins, the watcher brings it in
               this.diskFiles.set(rel, known!);
               this.pending.add(rel);
               this.schedule();
+            } else if (o === "same") {
+              this.unapplied.delete(rel);
+            } else if (o === "foreign") {
+              this.blocked.add(rel);
+              this.logError(`KEPT ${rel}: this file was not written by the mirror, so it is not overwritten; Studio's version of the instance is not written until you move or delete it`);
+              this.alert(`mirror: ${rel} was not written by the mirror and is left as it is; the mirror's file for that instance is written once you move or delete it`);
             }
           } catch (e: any) {
-            this.diskFiles.delete(rel);
+            // what was there is unchanged: still ours if it was, so the next render tries again
+            if (known !== undefined) this.diskFiles.set(rel, known);
+            else this.diskFiles.delete(rel);
             this.logError(`could not write ${rel}: ${e.message}`);
           }
         }),
       );
     }
+    for (const rel of [...this.forceRestore]) if (!layout.files.has(rel)) this.forceRestore.delete(rel);
+    await this.writeRootFiles();
+    await this.writeManifest().catch((e) => this.logError(`could not write ${MARKER}: ${e.message}`));
+    if (written) this.note(`wrote ${written} file(s)`);
+  }
+
+  private async writeRootFiles() {
     await this.writeRootFile("AGENTS.md", AGENTS_MD);
     await this.writeRootFile("_tree.txt", treeOverview(this.roots, this.others));
     await this.writeRootFile("_errors.log", this.errors.join("\n") + (this.errors.length ? "\n" : ""));
-    if (writes.length) this.note(`wrote ${writes.length} file(s)`);
   }
 
   private async writeRootFile(name: string, text: string) {
@@ -663,8 +967,55 @@ export class MirrorSession {
     this.logError(`REJECTED ${rel}: ${reason}`);
   }
 
+  /** Disk edits that are not in Studio. Returns false for the ones given up on. */
+  private markUnapplied(paths: string[], reason: string, attempt: boolean) {
+    const now = new Date().toISOString();
+    const gaveUp: string[] = [];
+    for (const rel of paths) {
+      if (!rel) continue;
+      const u = this.unapplied.get(rel) ?? { since: now, reason, attempts: 0 };
+      u.reason = clean(reason, 300);
+      if (attempt) u.attempts++;
+      this.unapplied.set(rel, u);
+      if (u.attempts >= MAX_APPLY_ATTEMPTS) {
+        this.unapplied.delete(rel);
+        const text = readText(this.abs(rel));
+        if (text !== null) this.rejected.set(rel, sha(text));
+        gaveUp.push(rel);
+      }
+    }
+    if (gaveUp.length) {
+      this.logError(`REJECTED ${gaveUp.join(", ")}: Studio failed to apply ${MAX_APPLY_ATTEMPTS} times (${reason}); the files are left as you wrote them and are not retried until you edit them again`);
+      this.alert(`mirror: Studio failed to apply ${gaveUp.slice(0, 5).join(", ")}${gaveUp.length > 5 ? " and more" : ""} ${MAX_APPLY_ATTEMPTS} times (${reason}). Your files are left as you wrote them and listed under rejectedFiles in mirror_status.`);
+    }
+  }
+
   private async processBatch(paths: string[]) {
     if (this.stopped) return;
+    const wasUnapplied = paths.filter((p) => this.unapplied.has(p));
+    if (this.stale) {
+      // the last apply failed and Studio has not been reloaded since: hold these until it is
+      const held = paths.filter((p) => p && !this.blocked.has(p));
+      if (held.length) {
+        this.markUnapplied(held, "Studio has not answered since an earlier apply failed", false);
+        await this.writeRootFiles();
+      }
+      return;
+    }
+    const outcome = await this.processBatchInner(paths);
+    if (outcome === "deferred" || outcome === "failed") return;
+    for (const p of paths) this.unapplied.delete(p);
+    const applied = wasUnapplied.filter((p) => !this.rejected.has(p));
+    if (outcome === "applied" && applied.length) {
+      this.alert(`mirror: ${applied.length} kept edit(s) reached Studio after it answered again: ${applied.slice(0, 5).join(", ")}${applied.length > 5 ? " ..." : ""}`);
+    }
+  }
+
+  private async processBatchInner(paths: string[]): Promise<"deferred" | "failed" | "refused" | "applied" | "none"> {
+    // what disk looked like to us before this batch: restored if Studio does not take it
+    const snapFiles = new Map(this.diskFiles);
+    const snapDirs = new Set(this.diskDirs);
+    let blockedGone = false;
     const added = new Map<string, { text: string; hash: string }>();
     const modified = new Map<string, { text: string; hash: string }>();
     const addedDirs = new Set<string>();
@@ -675,6 +1026,14 @@ export class MirrorSession {
     for (const rel of paths) {
       if (rel === "") {
         if (!fs.existsSync(this.root)) rootGone = true;
+        continue;
+      }
+      if (this.blocked.has(rel)) {
+        // a file the mirror did not write, where it wants to write: ignored until moved or deleted
+        if (!fs.existsSync(this.abs(rel))) {
+          this.blocked.delete(rel);
+          blockedGone = true;
+        }
         continue;
       }
       let st: fs.Stats | undefined;
@@ -730,7 +1089,7 @@ export class MirrorSession {
           this.deferrals++;
           for (const rel of paths) this.pending.add(rel);
           this.schedule();
-          return;
+          return "deferred";
         }
       }
     }
@@ -738,13 +1097,20 @@ export class MirrorSession {
 
     if (!fs.existsSync(this.root)) rootGone = true;
     const missingService = rootGone ? undefined : this.roots.find((s) => !fs.existsSync(this.abs(encodeName(s.name))));
-    if (rootGone) return this.refuse("the mirror folder was removed", [...this.diskFiles.keys()], true);
+    if (rootGone) {
+      await this.refuse("the mirror folder was removed", [...this.diskFiles.keys()], true);
+      return "refused";
+    }
     if (missingService) {
       const dir = encodeName(missingService.name);
       const all = [...this.diskFiles.keys()].filter((f) => isUnder(f, dir));
-      return this.refuse(`the service directory ${missingService.name} was removed; nothing was applied`, [...all, ...removedFiles, ...modified.keys()], false);
+      await this.refuse(`the service directory ${missingService.name} was removed; nothing was applied`, [...all, ...removedFiles, ...modified.keys()], false);
+      return "refused";
     }
-    if (added.size + modified.size + addedDirs.size + removedFiles.size + removedDirs.size === 0) return;
+    if (added.size + modified.size + addedDirs.size + removedFiles.size + removedDirs.size === 0) {
+      if (blockedGone) await this.render();
+      return "none";
+    }
 
     // ---- plan (read-only): parse everything, find renames, count deletions
     const docs = new Map<string, DocNode>();
@@ -801,12 +1167,15 @@ export class MirrorSession {
       if (node) destroyCount += this.countRemoved(node, doc, true);
     }
     const refuseBatch = async (reason: string) => {
-      const restore = [...removedFiles, ...restoreLater, ...modified.keys(), ...(await this.undoMoves(dirMoves, fileMoves))];
-      return this.refuse(reason, restore, false);
+      // a new file where the layout has one (a re-added model.json) is put back too
+      const restore = [...removedFiles, ...restoreLater, ...modified.keys(), ...[...added.keys()].filter((r) => this.layout.files.has(r)), ...(await this.undoMoves(dirMoves, fileMoves))];
+      await this.refuse(reason, restore, false);
+      return "refused" as const;
     };
     if (destroyCount > this.threshold) {
       return refuseBatch(`batch would destroy ${destroyCount} instances (limit ${this.threshold}); nothing was applied. Use the delete tool for intentional bulk deletes`);
     }
+    let destroyEntry: { at: number; count: number } | undefined;
     if (destroyCount > 0) {
       const now = Date.now();
       this.recentDestroys = this.recentDestroys.filter((e) => now - e.at < this.destroyWindow);
@@ -816,7 +1185,8 @@ export class MirrorSession {
           `batch would destroy ${destroyCount} instances on top of ${recent} in the last ${Math.round(this.destroyWindow / 1000)} s (limit ${this.destroyBudget}); nothing was applied. Use the delete tool for intentional bulk deletes`,
         );
       }
-      this.recentDestroys.push({ at: now, count: destroyCount });
+      destroyEntry = { at: now, count: destroyCount };
+      this.recentDestroys.push(destroyEntry);
     }
 
     // ---- mutate the shadow and build the ops
@@ -829,7 +1199,10 @@ export class MirrorSession {
       plan.destroys.push({ op: "destroy", id: n.id });
       this.dropSubtree(n);
     }
-    for (const rel of restoreLater) this.diskFiles.delete(rel);
+    for (const rel of restoreLater) {
+      this.diskFiles.delete(rel);
+      this.forceRestore.add(rel);
+    }
 
     for (const rel of [...addedDirs].sort((a, b) => a.length - b.length)) this.createDir(rel, docs.get(`${rel}/gui.json`)?.cls, plan);
     const order = (r: string) => (["model.json", "gui.json", "_props.json"].includes(baseOf(r)) ? 0 : 1);
@@ -847,18 +1220,29 @@ export class MirrorSession {
 
     if (plan.empty) {
       await this.render();
-      return;
+      return "none";
     }
     let res: any;
     try {
       res = await this.send("mirror_apply", { ops: plan.ops }, 120_000);
     } catch (e: any) {
-      this.logError(`could not apply to Studio (${e.message}); reloading the place so the files match it`);
+      // Never write the shadow over these edits: it is not what Studio has, and the edits are the agent's.
+      // Bookkeeping goes back to before the batch, so the files read as changed and are applied again.
+      this.diskFiles = snapFiles;
+      this.diskDirs = snapDirs;
       for (const n of plan.creates) this.dropProvisional(n.t as number);
-      await this.render();
-      // queued, not awaited: this batch holds the queue. If Studio is gone it logs, and a reconnect resyncs
-      void this.resync("after a failed apply");
-      return;
+      // nothing was destroyed: the retry must not be charged twice against the budget
+      if (destroyEntry) this.recentDestroys = this.recentDestroys.filter((x) => x !== destroyEntry);
+      this.stale = true;
+      const reason = clean(String(e?.message ?? e), 300);
+      const touched = paths.filter((p) => p && !this.blocked.has(p));
+      this.logError(`could not apply to Studio (${reason}); your edits stay on disk and are applied again once Studio is reloaded: ${touched.slice(0, 10).join(", ")}${touched.length > 10 ? " ..." : ""}`);
+      this.markUnapplied(touched, reason, true);
+      this.alert(`mirror: Studio did not take your file edits (${reason}). They are kept on disk, NOT in Studio yet, and are applied again once Studio answers: ${touched.slice(0, 5).join(", ")}${touched.length > 5 ? " ..." : ""}`);
+      await this.writeRootFiles();
+      // queued, not awaited: this batch holds the queue. If Studio is gone it fails, and a reconnect resyncs
+      void this.resync("after a failed apply").catch(() => {});
+      return "failed";
     }
     for (const c of res?.created ?? []) this.adopt(c.t, c.node);
     for (const c of plan.creates) if (this.nodes.has(c.t as number)) this.failCreate(c.t as number, plan);
@@ -867,6 +1251,7 @@ export class MirrorSession {
     this.applied++;
     this.note(`applied ${plan.ops.length} change(s) from disk`);
     await this.render();
+    return "applied";
   }
 
   private dirCovered(d: string, removed: Set<string>) {
@@ -906,7 +1291,10 @@ export class MirrorSession {
     this.refusals.push({ time: new Date().toISOString(), reason: clean(reason, 2000) });
     this.logError(`REFUSED: ${reason}`);
     // disk is restored from the shadow so it keeps matching Studio
-    for (const f of files) this.diskFiles.delete(f);
+    for (const f of files) {
+      this.diskFiles.delete(f);
+      this.forceRestore.add(f);
+    }
     if (rootGone) {
       this.diskDirs.clear();
       this.lastHashes.clear();

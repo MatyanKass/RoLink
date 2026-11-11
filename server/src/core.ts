@@ -83,7 +83,53 @@ export class Core {
     };
   }
 
+  /**
+   * Every tool result carries what the mirror has to say: edits that are on disk but not in
+   * Studio (each time, until they land) and one-time notices such as conflicts.
+   */
   async call(tool: string, args: Args = {}): Promise<ToolResult> {
+    try {
+      const r = await this.callTool(tool, args);
+      const w = this.mirrorWarnings();
+      return w.length ? { ...r, text: `${r.text}\n\n${w.join("\n")}` } : r;
+    } catch (e: any) {
+      const w = this.mirrorWarnings();
+      if (w.length && e instanceof Error) e.message = `${e.message}\n\n${w.join("\n")}`;
+      throw e;
+    }
+  }
+
+  private mirrorWarnings(): string[] {
+    const m = this.mirror;
+    if (!m) return [];
+    const out = m.takeAlerts().map((a) => `WARNING (mirror): ${a}`);
+    const pending = m.pendingWarning();
+    if (pending) {
+      const studio = this.mirrorStudio();
+      out.push(`WARNING (mirror): ${pending}${studio.connected ? "" : ` ${studio.note}`}`);
+    }
+    return out;
+  }
+
+  /** Whether the Studio the mirror is bound to is connected now, and under which name. */
+  private mirrorStudio(): { connected: boolean; placeName?: string; placeId?: number; note?: string } {
+    if (!this.mirrorBinding) return { connected: false };
+    try {
+      const s = this.bridge.resolve(this.mirrorBinding);
+      return { connected: true, placeName: s.placeName, placeId: s.placeId };
+    } catch {
+      const others = this.bridge.list().filter((s) => s.context === "edit" && !s.duplicate);
+      return {
+        connected: false,
+        note:
+          `The Studio this mirror was started on ("${this.mirrorBinding.placeName}") is not connected.` +
+          (others.length ? ` Connected now: ${others.map((s) => `"${s.placeName}"`).join(", ")}; the mirror does not move to another Studio by itself.` : "") +
+          " If it does not come back, copy what you need, then mirror_stop and mirror_start (the restart moves the mirror's own files to .rolink-trash).",
+      };
+    }
+  }
+
+  private async callTool(tool: string, args: Args): Promise<ToolResult> {
     switch (tool) {
       case "status":
         return this.status();
@@ -152,7 +198,7 @@ export class Core {
       case "mirror_stop":
         return this.mirrorStop();
       case "mirror_status":
-        return json(this.mirror ? this.mirror.status() : { active: false });
+        return json(this.mirror ? { ...this.mirror.status(), studio: this.mirrorStudio() } : { active: false });
       case "playtest_start":
         return json(await this.playtests.start(args));
       case "playtest_stop":
@@ -196,7 +242,10 @@ export class Core {
       const st = this.sync.status();
       lines.push(`Sync: ${st.project} (${st.root}) → ${st.place}, ${st.items} items`);
     } else lines.push("Sync: off");
-    lines.push(this.mirror ? `Mirror: ${this.mirror.root} -> ${this.mirror.placeName}` : "Mirror: off");
+    if (this.mirror) {
+      const st = this.mirrorStudio();
+      lines.push(`Mirror: ${this.mirror.root} -> ${this.mirror.placeName}${st.connected ? (st.placeName !== this.mirror.placeName ? ` (now named "${st.placeName}")` : "") : " (that Studio is NOT connected)"}`);
+    } else lines.push("Mirror: off");
     return { text: lines.join("\n") };
   }
 
@@ -432,9 +481,15 @@ export class Core {
 
   private async mirrorStop(): Promise<ToolResult> {
     if (!this.mirror) return { text: "mirror was not running" };
+    // said now: once stopped, nothing else reports them
+    const warnings = this.mirrorWarnings();
+    const pending = this.mirror.status().unappliedEdits.map((u) => u.file);
     await this.mirror.stop();
     this.mirror = undefined;
-    return { text: "mirror stopped; the files stay on disk but are no longer live" };
+    this.mirrorBinding = undefined;
+    const lines = ["mirror stopped; the files stay on disk but are no longer live"];
+    if (pending.length) lines.push(`NOT applied to Studio (still only on disk): ${pending.join(", ")}`);
+    return { text: [...lines, ...warnings].join("\n") };
   }
 
   private async syncStop(): Promise<ToolResult> {

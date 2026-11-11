@@ -154,6 +154,68 @@ test("mirror commands and deltas stay with the Studio it started on", async () =
   fs.rmSync(path.dirname(dir), { recursive: true, force: true });
 });
 
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitUntil(fn, what) {
+  for (let i = 0; i < 300; i++) {
+    if (await fn()) return;
+    await pause(20);
+  }
+  assert.fail(`timed out: ${what}`);
+}
+
+test("mirror edits made while the bound Studio is gone are kept, reported on every tool result, and applied when it is back (field report)", async () => {
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
+  const id = ++placeSeq;
+  const sid = await hello("Place1", id);
+  const a = fakePlugin(sid);
+  const dir = mirrorDir();
+  await core.call("mirror_start", { dir, services: ["Workspace"], place: "Place1" });
+  await a.end(); // Studio drops off the bridge
+  const props = path.join(dir, "Workspace", "_props.json");
+  fs.writeFileSync(props, '{"Gravity":10}');
+  await waitUntil(() => core.mirror.status().unappliedCount > 0, "the edit is held");
+  await pause(200);
+  assert.equal(fs.readFileSync(props, "utf8"), '{"Gravity":10}', "the agent's edit is not overwritten");
+  const r = await core.call("status", {});
+  assert.match(r.text, /WARNING \(mirror\): .*NOT in Studio.*_props\.json/);
+  assert.match(r.text, /not connected/);
+  assert.match(r.text, /Studio did not take your file edits/, "the one-time alert");
+  const again = await core.call("status", {});
+  assert.match(again.text, /NOT in Studio/, "the standing warning repeats while the edit waits");
+  assert.doesNotMatch(again.text, /did not take/, "the alert is given once");
+  assert.match(JSON.parse((await core.call("mirror_status", {})).text.split("\n\n")[0]).studio.note, /not connected/);
+
+  // the same Studio comes back under a new name (an unsaved place), as the plugin reconnects
+  const sid2 = await hello("Place2", id, { replaces: sid });
+  const b = fakePlugin(sid2);
+  await waitUntil(() => core.mirror.status().unappliedCount === 0, "the held edit is applied after the reconnect");
+  const apply = b.ops.find((o) => o.op === "mirror_apply");
+  assert.ok(apply && JSON.stringify(apply.args).includes("Gravity"), JSON.stringify(b.ops.map((o) => o.op)));
+  const after = await core.call("status", {});
+  assert.doesNotMatch(after.text, /NOT in Studio/);
+  assert.match(after.text, /reached Studio/);
+  assert.match(after.text, /now named "Place2"/);
+  const stop = await core.call("mirror_stop", {});
+  assert.doesNotMatch(stop.text, /NOT applied/);
+  await b.end();
+  fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+});
+
+test("mirror_stop names the edits that never reached Studio", async () => {
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
+  const sid = await hello("Gone", ++placeSeq);
+  const a = fakePlugin(sid);
+  const dir = mirrorDir();
+  await core.call("mirror_start", { dir, services: ["Workspace"], place: "Gone" });
+  await a.end();
+  fs.writeFileSync(path.join(dir, "Workspace", "_props.json"), '{"Gravity":11}');
+  await waitUntil(() => core.mirror.status().unappliedCount > 0, "held");
+  const stop = await core.call("mirror_stop", {});
+  assert.match(stop.text, /NOT applied to Studio.*Workspace\/_props\.json/);
+  assert.equal(fs.readFileSync(path.join(dir, "Workspace", "_props.json"), "utf8"), '{"Gravity":11}');
+  fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+});
+
 test("import: the cframe argument wins over the placement saved in a JSON file", async () => {
   const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-import-"));
