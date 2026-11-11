@@ -128,6 +128,8 @@ test("a late Yes after the timeout does not change the answer", async () => {
   let late;
   const { confirm } = win((child) => { late = child; }, { killGraceMs: 5 });
   const r = await confirm({ ...REQ, timeoutMs: 10 });
+  // under load the 15 ms timer can beat the fake spawn's setImmediate
+  while (!late) await new Promise((res) => setImmediate(res));
   exits("RL-YES", 0)(late);
   assert.equal(r.confirmed, false);
 });
