@@ -497,6 +497,25 @@ test("the manifest cannot point the trash at files outside the mirror's own", as
   }
 });
 
+test("a .rolink-trash that is a link is refused, so nothing is carried out of the mirror", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-out-"));
+  try {
+    fs.writeFileSync(path.join(dir, ".rolink-mirror.json"), JSON.stringify({ version: 2, files: ["Workspace/A.Part.json"], dirs: ["Workspace"] }));
+    fs.mkdirSync(path.join(dir, "Workspace"));
+    fs.writeFileSync(path.join(dir, "Workspace", "A.Part.json"), "{}");
+    fs.symlinkSync(outside, path.join(dir, ".rolink-trash"), "junction");
+    const m = new MirrorSession({ dir, services: SERVICES, debounceMs: 30 }, place().send, "P");
+    await assert.rejects(m.start(), /not a plain folder/);
+    assert.ok(fs.existsSync(path.join(dir, "Workspace", "A.Part.json")));
+    assert.deepEqual(fs.readdirSync(outside), []);
+  } finally {
+    fs.rmSync(path.join(dir, ".rolink-trash"), { force: true, recursive: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("trash from older versions is never deleted; only the last few mirror generations are kept", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
   const studio = place();

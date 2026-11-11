@@ -358,7 +358,7 @@ export class MirrorSession {
     if (!this.unapplied.size) return null;
     const list = [...this.unapplied.keys()].slice(0, 5).join(", ");
     const more = this.unapplied.size > 5 ? ` and ${this.unapplied.size - 5} more` : "";
-    return `${this.unapplied.size} file edit(s) are on disk but NOT in Studio yet (${list}${more}). They are kept and applied when Studio answers again; see mirror_status.`;
+    return clean(`${this.unapplied.size} file edit(s) are on disk but NOT in Studio yet (${list}${more}). They are kept and applied when Studio answers again; see mirror_status.`, 2000);
   }
 
   private alert(msg: string) {
@@ -418,6 +418,7 @@ export class MirrorSession {
     const owned = Array.isArray(manifest?.files)
       ? { files: (manifest.files as unknown[]).filter(ownedPathOk), dirs: (Array.isArray(manifest.dirs) ? (manifest.dirs as unknown[]) : []).filter(ownedPathOk) }
       : await this.legacyOwned(entries);
+    this.assertNotLink(TRASH_DIR);
     const run = `run-${stamp()}-${randomUUID().slice(0, 8)}`;
     const trashRel = `${TRASH_DIR}/${run}`;
     const dirs = new Set(owned.dirs);
@@ -781,8 +782,20 @@ export class MirrorSession {
     }
   }
 
+  /** The mirror's own folders must be real folders: a link would carry files out of the mirror. */
+  private assertNotLink(dir: string) {
+    let st: fs.Stats | undefined;
+    try {
+      st = fs.lstatSync(this.abs(dir));
+    } catch {
+      return;
+    }
+    if (!st.isDirectory()) throw new Error(`${dir} in the mirror folder is not a plain folder (a link or a file); move it away and start again`);
+  }
+
   /** Keeps an agent's version of a file that Studio's version replaces or removes. */
   private keepConflict(rel: string, text: string, reason: string) {
+    this.assertNotLink(CONFLICT_DIR);
     const kept = `${CONFLICT_DIR}/${stamp()}/${rel}`;
     fs.mkdirSync(path.dirname(this.abs(kept)), { recursive: true });
     fs.writeFileSync(this.abs(kept), text, "utf8");
@@ -878,10 +891,18 @@ export class MirrorSession {
                     outcome = "same";
                     return false;
                   }
-                  outcome = "foreign";
-                  return false;
-                }
-                if (nowHash !== known) {
+                  if (!this.unapplied.has(rel)) {
+                    outcome = "foreign";
+                    return false;
+                  }
+                  // the agent's new file, not applied yet, where Studio now has an instance (its create may have landed)
+                  if (!this.reconciling) {
+                    outcome = "agent";
+                    return false;
+                  }
+                  outcome = "conflict";
+                  conflictText = now;
+                } else if (nowHash !== known) {
                   if (nowHash === h) {
                     this.diskFiles.set(rel, h);
                     outcome = "same";
@@ -912,7 +933,7 @@ export class MirrorSession {
               }
             } else if (o === "agent") {
               // an agent saved this file since we last wrote it: its edit wins, the watcher brings it in
-              this.diskFiles.set(rel, known!);
+              if (known !== undefined) this.diskFiles.set(rel, known);
               this.pending.add(rel);
               this.schedule();
             } else if (o === "same") {
