@@ -71,6 +71,18 @@ export class Core {
     return this.bridge.send(s.id, op, payload, timeoutMs);
   }
 
+  /**
+   * One session for every step of a multi-step tool (staged chunks, then a build): picked
+   * once, so a newer Studio connecting halfway cannot receive the rest of the steps.
+   */
+  private pinned(args: Args) {
+    let s: SessionInfo | undefined;
+    return (op: string, payload: unknown, timeoutMs?: number) => {
+      s ??= this.session(args);
+      return this.bridge.send(s.id, op, payload, timeoutMs);
+    };
+  }
+
   async call(tool: string, args: Args = {}): Promise<ToolResult> {
     switch (tool) {
       case "status":
@@ -122,13 +134,13 @@ export class Core {
       case "import_model":
         return this.importModel(args);
       case "toolbox_search":
-        return toolboxSearch(args, (op, p, t) => this.op(args, op, p, t));
+        return toolboxSearch(args, this.pinned(args));
       case "toolbox_insert":
-        return toolboxInsert(args, (op, p, t) => this.op(args, op, p, t));
+        return toolboxInsert(args, this.pinned(args));
       case "toolbox_release":
-        return toolboxRelease(args, (op, p, t) => this.op(args, op, p, t));
+        return toolboxRelease(args, this.pinned(args));
       case "import_animation":
-        return importAnimation(args, (op, p, t) => this.op(args, op, p, t));
+        return importAnimation(args, this.pinned(args));
       case "sync_start":
         return this.syncStart(args);
       case "sync_stop":
@@ -166,7 +178,7 @@ export class Core {
       case "script_search":
       case "script_diagnostics":
       case "generate_model":
-        return editorTool(tool, args, (op, p, t) => this.op(args, op, p, t));
+        return editorTool(tool, args, this.pinned(args));
     }
     throw new Error(`unknown tool ${tool}`);
   }
@@ -356,10 +368,16 @@ export class Core {
     if (!projectFile) throw new Error(`no *.project.json in ${dir}`);
     const s = this.session(args);
     if (this.mirror) this.assertNoOverlap(projectFile, this.mirror.services);
-    if (this.sync) await this.sync.stop();
+    if (this.sync) {
+      const old = this.sync;
+      // stopped is stopped: whatever fails below must not leave it reported as running
+      this.sync = undefined;
+      this.syncBinding = undefined;
+      await old.stop();
+    }
     let api;
     try {
-      api = await getApi();
+      api = (await this.api()) as Awaited<ReturnType<typeof getApi>>;
     } catch {}
     const project = new Project(projectFile, api);
     const binding = this.bridge.bind(s.id);
@@ -370,7 +388,11 @@ export class Core {
       const res = await this.sync.start();
       return json({ syncing: projectFile, place: s.placeName, ...res });
     } catch (e) {
+      const failed = this.sync;
       this.sync = undefined;
+      this.syncBinding = undefined;
+      // a start that got as far as the watcher must not keep watching
+      await failed?.stop().catch(() => {});
       throw e;
     }
   }

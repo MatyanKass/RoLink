@@ -21,11 +21,11 @@
   },
   "dependencies": {
     "@gltf-transform/core": "^4.5.1",
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "chokidar": "^5.0.0",
     "jpeg-js": "^0.4.4",
     "pngjs": "^7.0.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

@@ -43,6 +43,29 @@ export interface Snapshot {
 const SCRIPT_RE = /^(.*?)(\.server|\.client)?\.(lua|luau)$/;
 const key = (p: string[]) => p.join("\u0000");
 
+/** `abs` is `root` or below it (by path text only). */
+function under(root: string, abs: string): boolean {
+  const rel = path.relative(root, abs);
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
+}
+
+/** `abs` exists and, with every symbolic link resolved, is inside the (also resolved) root. */
+export function realInside(root: string, abs: string): boolean {
+  try {
+    return under(fs.realpathSync(root), fs.realpathSync(abs));
+  } catch {
+    return false;
+  }
+}
+
+function isLink(abs: string): boolean {
+  try {
+    return fs.lstatSync(abs).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 export function findProjectFile(dir: string): string | null {
   for (const name of ["rolink.project.json", "default.project.json"]) {
     const p = path.join(dir, name);
@@ -176,7 +199,11 @@ export class Project {
     const out = [this.file];
     const visit = (n: any) => {
       if (!n || typeof n !== "object") return;
-      if (typeof n.$path === "string") out.push(path.resolve(this.root, n.$path));
+      if (typeof n.$path === "string") {
+        const abs = path.resolve(this.root, n.$path);
+        // a path that does not exist yet is watched if it would be inside the project
+        if (fs.existsSync(abs) ? realInside(this.root, abs) : under(this.root, abs)) out.push(abs);
+      }
       for (const [k, v] of Object.entries(n)) if (!k.startsWith("$")) visit(v);
     };
     visit(json.tree);
@@ -191,6 +218,9 @@ export class Project {
       const abs = path.resolve(this.root, node.$path);
       if (!fs.existsSync(abs)) {
         snap.warnings.push(`$path not found: ${node.$path}`);
+      } else if (!realInside(this.root, abs)) {
+        // a project file from an untrusted repository must not reach files outside it
+        snap.warnings.push(`$path outside the project folder (or through a link leading out of it), skipped: ${node.$path}`);
       } else if (fs.statSync(abs).isDirectory()) {
         snap.roots.push(instPath);
         if (instPath.length <= 1) {
@@ -220,6 +250,7 @@ export class Project {
   }
 
   private async readMeta(file: string): Promise<{ properties?: Record<string, unknown>; className?: string } | null> {
+    if (isLink(file)) return null;
     try {
       return JSON.parse(await fsp.readFile(file, "utf8"));
     } catch {
@@ -229,7 +260,7 @@ export class Project {
 
   private async walkDir(abs: string, instPath: string[], snap: Snapshot, forcedClass?: string, extraProps?: any) {
     const entries = await fsp.readdir(abs);
-    const init = entries.find((e) => /^init(\.server|\.client)?\.(lua|luau)$/.test(e));
+    const init = entries.find((e) => /^init(\.server|\.client)?\.(lua|luau)$/.test(e) && !isLink(path.join(abs, e)));
     const meta = entries.includes("init.meta.json") ? await this.readMeta(path.join(abs, "init.meta.json")) : null;
     let item: SyncItem;
     if (init) {
@@ -252,7 +283,11 @@ export class Project {
     for (const e of entries) {
       if (e.startsWith(".") || /^init(\.server|\.client)?\.(lua|luau)$/.test(e) || e === "init.meta.json") continue;
       const full = path.join(abs, e);
-      const st = await fsp.stat(full);
+      const st = await fsp.lstat(full);
+      if (st.isSymbolicLink()) {
+        snap.warnings.push(`${this.rel(full)}: symbolic links are not followed, skipped`);
+        continue;
+      }
       if (st.isDirectory()) {
         await this.walkDir(full, [...instPath, e], snap);
       } else {
@@ -447,6 +482,11 @@ export class SyncSession {
     let item = this.snap.items.find((i) => key(i.path) === k);
     let target: string | undefined;
     if (item?.file && item.source !== undefined) {
+      // Foo.json becomes a generated ModuleScript: its Luau must never be written over the JSON
+      if (!SCRIPT_RE.test(path.basename(item.file))) {
+        this.note(`Studio edit of ${ev.path.join("/")} not written back: it is generated from ${item.file}; edit that file instead`);
+        return;
+      }
       target = path.resolve(this.project.root, item.file);
     } else if (ev.type === "created") {
       const parentDir = this.snap.dirs.get(key(ev.path.slice(0, -1)));
@@ -469,6 +509,11 @@ export class SyncSession {
       this.snap.items.push(item);
     }
     if (!target || !item) return;
+    // never through a link, never outside the project: the files may come from an untrusted repository
+    if (isLink(target) || !realInside(this.project.root, path.dirname(target))) {
+      this.note(`refused to write ${this.project.rel(target)}: it is a symbolic link or outside the sync root`);
+      return;
+    }
     const current = fs.existsSync(target) ? await fsp.readFile(target, "utf8") : null;
     if (current === ev.source) return;
     this.ownWrites.set(path.resolve(target), Date.now());

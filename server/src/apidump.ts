@@ -73,7 +73,11 @@ export async function readDump(opts: ReadDumpOptions = {}): Promise<any> {
   try {
     const st = await fs.stat(file);
     stale = Date.now() - st.mtimeMs > MAX_AGE_MS;
-  } catch {}
+    // a fresh but unreadable cache (a write cut short) would otherwise fail every start for a week
+    if (!stale) JSON.parse(await fs.readFile(file, "utf8"));
+  } catch {
+    stale = true;
+  }
   let failure: unknown;
   for (let attempt = 1; stale && attempt <= FETCH_ATTEMPTS; attempt++) {
     try {
@@ -83,7 +87,10 @@ export async function readDump(opts: ReadDumpOptions = {}): Promise<any> {
       const text = await r.text();
       JSON.parse(text); // validate before caching
       await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, text);
+      // write beside it and rename, so an interrupted write never leaves a truncated cache
+      const tmp = `${file}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, text);
+      await fs.rename(tmp, file);
       failure = undefined;
       break;
     } catch (e) {

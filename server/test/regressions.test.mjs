@@ -383,3 +383,275 @@ test(".gitignore covers .claude and every .env but .env.example", () => {
   assert.equal(ignored(".env.example"), false);
   assert.equal(ignored("publisher/.env.example"), false);
 });
+
+// ---------------------------------------------------------------- audit/server
+
+test("a command that timed out before Studio polled it is not delivered later", async () => {
+  const s = await hello("Late", ++placeSeq);
+  await assert.rejects(bridge.send(s, "slow_op", {}, 50), /did not answer "slow_op"/);
+  const second = bridge.send(s, "after", {}, 5_000);
+  const r = await (await fetch(`${BASE}/plugin/poll?s=${s}`)).json();
+  assert.deepEqual(r.commands.map((c) => c.op), ["after"], "the abandoned command is gone from the queue");
+  await postJson("/plugin/result", { s, id: r.commands[0].id, ok: true, result: 1 });
+  assert.equal(await second, 1);
+  await bye(s);
+});
+
+test("a multi-step import stays on the Studio it started on when a newer one connects", async () => {
+  const { RIGS } = await import("../dist/animation.js");
+  const { Document, NodeIO } = await import("@gltf-transform/core");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-pin-"));
+  const doc = new Document();
+  const buf = doc.createBuffer();
+  const node = doc.createNode("LeftUpperArm");
+  doc.createScene("S").addChild(node);
+  const input = doc.createAccessor().setType("SCALAR").setArray(new Float32Array([0, 1])).setBuffer(buf);
+  const output = doc.createAccessor().setType("VEC4").setArray(new Float32Array([0, 0, 0, 1, 0.7071, 0, 0, 0.7071])).setBuffer(buf);
+  const sampler = doc.createAnimationSampler().setInput(input).setOutput(output);
+  doc.createAnimation("Wave").addSampler(sampler).addChannel(doc.createAnimationChannel().setTargetNode(node).setTargetPath("rotation").setSampler(sampler));
+  const file = path.join(dir, "wave.glb");
+  await new NodeIO().write(file, doc);
+
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
+  const place = `Pin${++placeSeq}`;
+  const a = await hello(place, placeSeq);
+  let b;
+  const opsA = [];
+  let stop = false;
+  const loopA = (async () => {
+    while (!stop) {
+      const r = await fetch(`${BASE}/plugin/poll?s=${a}`);
+      if (r.status !== 200) return;
+      for (const c of (await r.json()).commands) {
+        opsA.push(c.op);
+        let result = {};
+        if (c.op === "animation_rig_info") {
+          // a second Studio with a similar name connects while the import runs
+          b ??= await hello(`${place} copy`, ++placeSeq);
+          result = { ...RIGS.R15 };
+        }
+        if (c.op === "animation_build") result = { created: { path: "ServerStorage/Wave" } };
+        await postJson("/plugin/result", { s: a, id: c.id, ok: true, result });
+      }
+    }
+  })();
+  try {
+    const r = await core.call("import_animation", { path: file, rig: "Workspace/Rig", place });
+    assert.match(r.text, /ServerStorage\/Wave/);
+    assert.deepEqual(opsA.filter((o) => o !== "animation_stage"), ["animation_rig_info", "animation_build"]);
+    assert.ok(opsA.includes("animation_stage"), "chunks went to the same Studio");
+  } finally {
+    stop = true;
+    await bye(a);
+    if (b) await bye(b);
+    await loopA;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function syncProject() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-syncfix-"));
+  fs.mkdirSync(path.join(dir, "src"));
+  fs.writeFileSync(path.join(dir, "default.project.json"), JSON.stringify({ name: "P", tree: { $className: "DataModel", ReplicatedStorage: { Shared: { $path: "src" } } } }));
+  fs.writeFileSync(path.join(dir, "src", "Data.json"), '{"a":1}\n');
+  fs.writeFileSync(path.join(dir, "src", "Mod.luau"), "return 1\n");
+  return dir;
+}
+
+test("a Studio edit of a ModuleScript made from a .json file does not write Luau into the .json", async () => {
+  const { Project } = await import("../dist/sync.js");
+  const dir = syncProject();
+  const session = new SyncSession(new Project(path.join(dir, "default.project.json")), async () => ({ created: 0, updated: 0, removed: 0 }), "P");
+  await session.start();
+  try {
+    await session.onPluginEvent({ type: "source", path: ["ReplicatedStorage", "Shared", "Data"], class: "ModuleScript", source: "return { a = 2 }" });
+    assert.equal(fs.readFileSync(path.join(dir, "src", "Data.json"), "utf8"), '{"a":1}\n');
+    await session.onPluginEvent({ type: "source", path: ["ReplicatedStorage", "Shared", "Mod"], class: "ModuleScript", source: "return 2\n" });
+    assert.equal(fs.readFileSync(path.join(dir, "src", "Mod.luau"), "utf8"), "return 2\n", "real script files still get Studio edits");
+  } finally {
+    await session.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a sync_start that fails after stopping the old sync does not leave the stopped sync active", async () => {
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
+  const dir = syncProject();
+  const place = `SyncFail${++placeSeq}`;
+  const s = await hello(place, placeSeq);
+  let stop = false;
+  const loop = (async () => {
+    while (!stop) {
+      const r = await fetch(`${BASE}/plugin/poll?s=${s}`);
+      if (r.status !== 200) return;
+      for (const c of (await r.json()).commands) {
+        if (c.op === "sync" && c.args.action === "stop") {
+          // Studio goes away while the old sync is being stopped
+          await bye(s);
+          return;
+        }
+        await postJson("/plugin/result", { s, id: c.id, ok: true, result: { created: 0, updated: 0, removed: 0 } });
+      }
+    }
+  })();
+  try {
+    await core.call("sync_start", { project: dir, place });
+    await assert.rejects(core.call("sync_start", { project: dir, place }), /disconnected|closed/);
+    assert.match((await core.call("status", {})).text, /Sync: off/);
+    assert.deepEqual(JSON.parse((await core.call("sync_status", {})).text), { active: false });
+  } finally {
+    stop = true;
+    await bye(s);
+    await loop;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a truncated API dump cache is downloaded again instead of failing for a week", async () => {
+  const file = tmpDump();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, DUMP.slice(0, 20));
+  let calls = 0;
+  const raw = await apidump.readDump({ file, retryDelayMs: 1, fetchFn: async () => (calls++, { ok: true, status: 200, text: async () => DUMP }) });
+  assert.equal(calls, 1);
+  assert.equal(raw.Classes[0].Name, "X");
+  assert.equal(fs.readFileSync(file, "utf8"), DUMP);
+});
+
+test("forwarded tool calls use a client without fetch's 300 s response limit", async () => {
+  const { postRpc } = await import("../dist/rpcclient.js");
+  const port = PORT + 2;
+  let got;
+  const srv = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      got = { token: req.headers["x-rolink-token"], body: JSON.parse(body) };
+      setTimeout(() => res.end(JSON.stringify({ ok: true, result: { text: "ж done" } })), 50);
+    });
+  });
+  await new Promise((r) => srv.listen(port, "127.0.0.1", r));
+  try {
+    const r = await postRpc("127.0.0.1", port, "tok", { tool: "run", args: { code: "ж" } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { ok: true, result: { text: "ж done" } });
+    assert.deepEqual(got, { token: "tok", body: { tool: "run", args: { code: "ж" } } });
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+  // the owner being gone must still be recognisable, so the caller can take the port over
+  await assert.rejects(postRpc("127.0.0.1", port, "tok", {}), (e) => e.code === "ECONNREFUSED");
+  assert.doesNotMatch(fs.readFileSync(path.join(here, "..", "src", "index.ts"), "utf8"), /fetch\(`http:\/\/\$\{HOST\}:\$\{PORT\}\/rpc/);
+});
+
+test("sync: a $path outside the project and links out of it are not read", async () => {
+  const { Project } = await import("../dist/sync.js");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-escape-"));
+  const dir = path.join(base, "repo");
+  const outside = path.join(base, "secret");
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "Stolen.luau"), "SECRET\n");
+  fs.writeFileSync(path.join(dir, "src", "Ok.luau"), "return 1\n");
+  fs.symlinkSync(outside, path.join(dir, "src", "Linked"), "junction");
+  fs.writeFileSync(
+    path.join(dir, "default.project.json"),
+    JSON.stringify({ name: "P", tree: { $className: "DataModel", ReplicatedStorage: { Shared: { $path: "src" }, Up: { $path: "../secret" }, Abs: { $path: outside } } } }),
+  );
+  try {
+    const project = new Project(path.join(dir, "default.project.json"));
+    const snap = await project.snapshot();
+    const names = snap.items.map((i) => i.path.join("/"));
+    assert.ok(names.includes("ReplicatedStorage/Shared/Ok"), names.join(","));
+    assert.ok(!snap.items.some((i) => (i.source ?? "").includes("SECRET")), names.join(","));
+    assert.ok(!names.some((n) => /Up|Abs|Linked/.test(n)), names.join(","));
+    assert.equal(snap.warnings.filter((w) => /outside the project/.test(w)).length, 2, snap.warnings.join("\n"));
+    assert.ok(snap.warnings.some((w) => /symbolic links are not followed/.test(w)));
+    const watched = await project.watchedPaths();
+    assert.ok(!watched.some((w) => w.startsWith(outside)), watched.join(","));
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("sync: a Studio edit is never written through a link to a file outside the project", async (t) => {
+  const { Project } = await import("../dist/sync.js");
+  const dir = syncProject();
+  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rolink-outside-")), "bashrc");
+  fs.writeFileSync(outside, "original\n");
+  const session = new SyncSession(new Project(path.join(dir, "default.project.json")), async () => ({ created: 0, updated: 0, removed: 0 }), "P");
+  await session.start();
+  try {
+    const mod = path.join(dir, "src", "Mod.luau");
+    fs.rmSync(mod);
+    try {
+      fs.symlinkSync(outside, mod, "file");
+    } catch (e) {
+      t.skip(`cannot create file symlinks here (${e.code})`);
+      return;
+    }
+    await session.onPluginEvent({ type: "source", path: ["ReplicatedStorage", "Shared", "Mod"], class: "ModuleScript", source: "pwned\n" });
+    assert.equal(fs.readFileSync(outside, "utf8"), "original\n");
+    assert.ok(session.status().recent.some((l) => /refused to write/.test(l)));
+  } finally {
+    await session.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(outside), { recursive: true, force: true });
+  }
+});
+
+test("sync: a Studio edit is never written into a folder that now links outside the project", async () => {
+  const { Project } = await import("../dist/sync.js");
+  const dir = syncProject();
+  fs.mkdirSync(path.join(dir, "src", "Sub"));
+  fs.writeFileSync(path.join(dir, "src", "Sub", "X.luau"), "return 'x'\n");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-outside-"));
+  fs.writeFileSync(path.join(outside, "X.luau"), "original\n");
+  const session = new SyncSession(new Project(path.join(dir, "default.project.json")), async () => ({ created: 0, updated: 0, removed: 0 }), "P");
+  await session.start();
+  try {
+    fs.rmSync(path.join(dir, "src", "Sub"), { recursive: true });
+    fs.symlinkSync(outside, path.join(dir, "src", "Sub"), "junction");
+    await session.onPluginEvent({ type: "source", path: ["ReplicatedStorage", "Shared", "Sub", "X"], class: "ModuleScript", source: "pwned\n" });
+    assert.equal(fs.readFileSync(path.join(outside, "X.luau"), "utf8"), "original\n");
+    assert.ok(session.status().recent.some((l) => /refused to write/.test(l)));
+  } finally {
+    await session.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("screenshot: PowerShell is run by absolute path and the place name cannot become a parameter", async () => {
+  const { powershellPath, titleArg } = await import("../dist/screenshot.js");
+  const ps = powershellPath({ SystemRoot: String.raw`C:\Windows` });
+  assert.equal(ps, String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`);
+  assert.ok(path.win32.isAbsolute(powershellPath({})));
+  assert.equal(titleArg("-Out C:/x"), "Out C:/x");
+  assert.equal(titleArg(" --Dll"), "Dll");
+  assert.equal(titleArg("—Title"), "Title");
+  assert.equal(titleArg("My-Game"), "My-Game");
+  const src = fs.readFileSync(path.join(here, "..", "src", "screenshot.ts"), "utf8");
+  assert.doesNotMatch(src, /execFile\(\s*"powershell/);
+});
+
+test("rpc token: kept out of the shared /tmp on POSIX, per-user temp on Windows", async () => {
+  const { tokenDir } = await import("../dist/bridge.js");
+  assert.equal(tokenDir({}, "win32"), os.tmpdir());
+  assert.equal(tokenDir({ XDG_RUNTIME_DIR: "/run/user/1000" }, "linux"), path.join("/run/user/1000", "rolink"));
+  assert.equal(tokenDir({}, "darwin"), path.join(os.homedir(), ".rolink"));
+  const live = fs.readFileSync(path.join(repo, "tools", "live.mjs"), "utf8");
+  assert.match(live, /XDG_RUNTIME_DIR/, "tools/live.mjs follows the same rule");
+});
+
+test("rpc token: a bridge that cannot write its token file does not keep the port", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-tok-"));
+  const notADir = path.join(dir, "file");
+  fs.writeFileSync(notADir, "x");
+  const port = PORT + 3;
+  const env = { ...process.env, ROLINK_PORT: String(port), TEMP: notADir, TMP: notADir, TMPDIR: notADir, XDG_RUNTIME_DIR: notADir };
+  const r = spawnSync(process.execPath, [path.join(here, "..", "dist", "index.js"), "--daemon"], { env, encoding: "utf8", timeout: 20_000 });
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /could not write the rpc token file/);
+});

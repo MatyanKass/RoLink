@@ -60,17 +60,49 @@ export interface SessionBinding {
   placeName: string;
 }
 
-/** Where the port owner stores the /rpc token (user-only file in the user's temp dir). */
+/**
+ * Folder of the /rpc token file. Windows: the user's own temp folder (per-user ACL).
+ * Elsewhere /tmp is shared by every user, so: $XDG_RUNTIME_DIR/rolink, else ~/.rolink (both 0700).
+ * Other readers of the token (publisher, tools/live.mjs) must use the same rule.
+ */
+export function tokenDir(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform) {
+  if (platform === "win32") return os.tmpdir();
+  return env.XDG_RUNTIME_DIR ? path.join(env.XDG_RUNTIME_DIR, "rolink") : path.join(os.homedir(), ".rolink");
+}
+
+/** Where the port owner stores the /rpc token. */
 export function tokenFile(port = PORT) {
-  return path.join(os.tmpdir(), `rolink-${port}.token`);
+  return path.join(tokenDir(), `rolink-${port}.token`);
+}
+
+/** POSIX: only a file or folder this user owns that nobody else can write or read. */
+function privateToUser(st: fs.Stats) {
+  if (process.platform === "win32" || typeof process.getuid !== "function") return true;
+  return st.uid === process.getuid() && (st.mode & 0o077) === 0;
 }
 
 export function readToken(port = PORT): string | undefined {
   try {
-    return fs.readFileSync(tokenFile(port), "utf8").trim() || undefined;
+    const f = tokenFile(port);
+    const st = fs.lstatSync(f);
+    // a file planted by another local user would hand our calls to their token
+    if (!st.isFile() || !privateToUser(st) || !privateToUser(fs.lstatSync(path.dirname(f)))) return undefined;
+    return fs.readFileSync(f, "utf8").trim() || undefined;
   } catch {
     return undefined;
   }
+}
+
+function writeToken(token: string, port = PORT) {
+  const f = tokenFile(port);
+  const dir = path.dirname(f);
+  if (process.platform !== "win32") {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = fs.lstatSync(dir);
+    if (!st.isDirectory() || !privateToUser(st)) throw new Error(`${dir} must be a folder only this user can access (chmod 700)`);
+  }
+  fs.rmSync(f, { force: true });
+  fs.writeFileSync(f, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
 }
 
 function sameToken(a: string, b: string) {
@@ -124,14 +156,14 @@ export class Bridge extends EventEmitter {
       server.listen(PORT, HOST, () => resolve(true));
     });
     if (!ok) return false;
-    this.server = server;
     try {
-      const f = tokenFile();
-      fs.rmSync(f, { force: true });
-      fs.writeFileSync(f, this.token, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    } catch (e) {
-      log("could not write rpc token file", e);
+      writeToken(this.token);
+    } catch (e: any) {
+      // without our token file other RoLink processes would read a stale or planted one
+      await new Promise<void>((r) => server.close(() => r()));
+      throw new Error(`could not write the rpc token file ${tokenFile()}: ${e?.message ?? e}`);
     }
+    this.server = server;
     setInterval(() => this.reap(), 5_000).unref();
     log(`bridge listening on http://${HOST}:${PORT}`);
     return true;
@@ -203,6 +235,9 @@ export class Bridge extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         s.pending.delete(id);
+        // never polled yet: the caller has been told it failed, so Studio must not run it later
+        const queued = s.queue.findIndex((c) => c.id === id);
+        if (queued >= 0) s.queue.splice(queued, 1);
         reject(new PluginError(`Studio did not answer "${op}" within ${Math.round(timeoutMs / 1000)}s`));
       }, timeoutMs);
       s.pending.set(id, { resolve, reject, timer, op });

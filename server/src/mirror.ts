@@ -358,8 +358,10 @@ export class MirrorSession {
       throw e;
     } finally {
       this.dumping = false;
+      // Also after a failed dump: these changes are newer than the restored shadow, and left
+      // buffered they would be replayed over the next dump, bringing back stale or deleted instances.
+      for (const ev of this.buffered.splice(0)) this.applyDelta(ev);
     }
-    for (const ev of this.buffered.splice(0)) this.applyDelta(ev);
   }
 
   private ingest(w: Wire) {
