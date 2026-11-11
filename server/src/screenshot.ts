@@ -26,6 +26,19 @@ async function helperDll(script: string): Promise<string> {
   return dllPath;
 }
 
+/** Absolute, so a powershell.exe in the working directory (searched first on Windows) or on PATH is never run. */
+export function powershellPath(env: NodeJS.ProcessEnv = process.env): string {
+  return path.win32.join(env.SystemRoot ?? env.windir ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+/**
+ * The place name only narrows down which window to capture. It comes from the place, and
+ * PowerShell's -File parsing would take a value starting with "-" as a parameter name.
+ */
+export function titleArg(placeName: string): string {
+  return placeName.replace(/^[\s\-\u2010-\u2015\u2212]+/, "");
+}
+
 export async function captureStudio(titleHint: string): Promise<{ image: Image; title: string }> {
   if (process.platform !== "win32") throw new Error("Screenshots are only supported on Windows");
   const script = path.join(SCRIPTS_DIR, "capture.ps1");
@@ -33,8 +46,8 @@ export async function captureStudio(titleHint: string): Promise<{ image: Image; 
   const dll = await helperDll(script);
   const stdout = await new Promise<string>((resolve, reject) => {
     execFile(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Out", out, "-Title", titleHint, "-Dll", dll],
+      powershellPath(),
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Out", out, "-Title", titleArg(titleHint), "-Dll", dll],
       { timeout: 30_000, windowsHide: true },
       (err, so, se) => {
         if (err && !so) reject(new Error(`capture failed: ${se || err.message}`));
@@ -42,18 +55,21 @@ export async function captureStudio(titleHint: string): Promise<{ image: Image; 
       },
     );
   });
-  const line = stdout.trim().split(/\r?\n/).pop() ?? "";
-  let res: { ok: boolean; error?: string; title?: string };
   try {
-    res = JSON.parse(line);
-  } catch {
-    throw new Error(`capture helper returned: ${stdout.slice(0, 300)}`);
+    const line = stdout.trim().split(/\r?\n/).pop() ?? "";
+    let res: { ok: boolean; error?: string; title?: string };
+    try {
+      res = JSON.parse(line);
+    } catch {
+      throw new Error(`capture helper returned: ${stdout.slice(0, 300)}`);
+    }
+    if (!res.ok) throw new Error(res.error ?? "capture failed");
+    const png = PNG.sync.read(await fs.readFile(out));
+    return { image: { width: png.width, height: png.height, data: png.data }, title: res.title ?? "" };
+  } finally {
+    // also when the helper failed after writing it: no full-window screenshots left in temp
+    await fs.unlink(out).catch(() => {});
   }
-  if (!res.ok) throw new Error(res.error ?? "capture failed");
-  const buf = await fs.readFile(out);
-  fs.unlink(out).catch(() => {});
-  const png = PNG.sync.read(buf);
-  return { image: { width: png.width, height: png.height, data: png.data }, title: res.title ?? "" };
 }
 
 const isMarker = (d: Buffer, i: number) => d[i] >= 245 && d[i + 1] <= 12 && d[i + 2] >= 245;

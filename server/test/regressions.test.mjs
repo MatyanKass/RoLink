@@ -621,3 +621,16 @@ test("sync: a Studio edit is never written into a folder that now links outside 
     fs.rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test("screenshot: PowerShell is run by absolute path and the place name cannot become a parameter", async () => {
+  const { powershellPath, titleArg } = await import("../dist/screenshot.js");
+  const ps = powershellPath({ SystemRoot: String.raw`C:\Windows` });
+  assert.equal(ps, String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`);
+  assert.ok(path.win32.isAbsolute(powershellPath({})));
+  assert.equal(titleArg("-Out C:/x"), "Out C:/x");
+  assert.equal(titleArg(" --Dll"), "Dll");
+  assert.equal(titleArg("—Title"), "Title");
+  assert.equal(titleArg("My-Game"), "My-Game");
+  const src = fs.readFileSync(path.join(here, "..", "src", "screenshot.ts"), "utf8");
+  assert.doesNotMatch(src, /execFile\(\s*"powershell/);
+});
