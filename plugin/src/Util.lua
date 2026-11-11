@@ -95,4 +95,75 @@ function Util.base64Decode(s)
 	return out
 end
 
+local MEMORY_SETTING = "RoLinkSessionMemory"
+local MEMORY_HOLDER = "RoLinkIdentity"
+local MEMORY_KEEP = 16
+
+--[[
+	Remembers this DataModel's last session id across plugin reloads (a reinstall, Studio
+	reloading plugins), so the server sees the same Studio coming back and a mirror or sync
+	bound to it follows. The per-DataModel key lives in a non-archivable folder under
+	`holderParent` (CoreGui: never saved, out of reach of game scripts); the session id itself
+	only in this plugin's settings. A new Studio window, or the place opened again, gets a new
+	key and so a new identity. Returns { get = fn() -> id?, set = fn(id) }.
+]]
+function Util.sessionMemory(plugin, holderParent, newKey)
+	local key
+	pcall(function()
+		local holder = holderParent:FindFirstChild(MEMORY_HOLDER)
+		if not holder then
+			holder = Instance.new("Folder")
+			holder.Name = MEMORY_HOLDER
+			holder.Archivable = false
+			holder:SetAttribute("key", newKey())
+			holder.Parent = holderParent
+		end
+		key = holder:GetAttribute("key")
+	end)
+	if type(key) ~= "string" or #key < 16 then
+		return {
+			get = function()
+				return nil
+			end,
+			set = function() end,
+		}
+	end
+	local function load()
+		local ok, t = pcall(function()
+			return plugin:GetSetting(MEMORY_SETTING)
+		end)
+		return (ok and type(t) == "table") and t or {}
+	end
+	return {
+		get = function()
+			local entry = load()[key]
+			if type(entry) == "table" and type(entry.s) == "string" then
+				return entry.s
+			end
+			return nil
+		end,
+		set = function(id)
+			local t = load()
+			t[key] = { s = id, at = os.time() }
+			local keys = {}
+			for k, v in t do
+				if type(k) == "string" and type(v) == "table" and type(v.at) == "number" then
+					table.insert(keys, k)
+				else
+					t[k] = nil
+				end
+			end
+			table.sort(keys, function(a, b)
+				return t[a].at > t[b].at
+			end)
+			for i = MEMORY_KEEP + 1, #keys do
+				t[keys[i]] = nil
+			end
+			pcall(function()
+				plugin:SetSetting(MEMORY_SETTING, t)
+			end)
+		end,
+	}
+end
+
 return Util

@@ -10,6 +10,7 @@ local ClientRelay = require(Root.ClientRelay)
 local Ops = require(Root.Ops)
 local Sync = require(Root.Sync)
 local Mirror = require(Root.Mirror)
+local Util = require(Root.Util)
 
 local VERSION = "0.1.0"
 local DEFAULT_PORT = 34872
@@ -25,6 +26,19 @@ local base = "http://127.0.0.1:" .. tostring(port)
 
 local session = nil
 local prevSession = nil -- last session id, sent as `replaces` on reconnect
+
+-- An edit DataModel remembers its session across plugin reloads, so the server keeps it the
+-- same Studio (a mirror bound to it follows) instead of seeing a stranger.
+local memory = nil
+if context == "edit" then
+	local okMemory, made = pcall(Util.sessionMemory, plugin, game:GetService("CoreGui"), function()
+		return HttpService:GenerateGUID(false)
+	end)
+	if okMemory then
+		memory = made
+		prevSession = made.get()
+	end
+end
 local wantConnected = false
 local loopRunning = false
 local statusText = "Disconnected"
@@ -311,6 +325,9 @@ local function hello()
 	end
 	session = data.session
 	prevSession = nil
+	if memory then
+		pcall(memory.set, session)
+	end
 	if not ensureApi() then
 		log("warning: could not load class table from server")
 	end

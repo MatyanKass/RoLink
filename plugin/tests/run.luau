@@ -67,6 +67,49 @@ for len = 0, 7 do
 end
 
 -------------------------------------------------------------------------------
+H.section("Util.sessionMemory: a reloaded plugin is the same Studio")
+
+do
+	local settings = {}
+	local fakePlugin = {}
+	function fakePlugin:GetSetting(k)
+		return settings[k]
+	end
+	function fakePlugin:SetSetting(k, v)
+		settings[k] = v
+	end
+	local n = 0
+	local function newKey()
+		n += 1
+		return string.rep(tostring(n), 32)
+	end
+	local windowA = Instance.new("Folder")
+	local windowB = Instance.new("Folder")
+	local first = Util.sessionMemory(fakePlugin, windowA, newKey)
+	check(first.get() == nil, "nothing remembered at first")
+	first.set("session-1")
+	local holder = windowA:FindFirstChild("RoLinkIdentity")
+	check(holder ~= nil and holder.Archivable == false, "the key holder is never saved with the place")
+	check(holder:GetAttribute("key") ~= "session-1" and not string.find(holder:GetAttribute("key"), "session", 1, true), "the DataModel keeps a key, never the session id")
+	local reloaded = Util.sessionMemory(fakePlugin, windowA, newKey)
+	check(reloaded.get() == "session-1", "the reloaded plugin in the same DataModel gets its last session back")
+	local other = Util.sessionMemory(fakePlugin, windowB, newKey)
+	check(other.get() == nil, "another Studio window does not")
+	other.set("session-B")
+	check(reloaded.get() == "session-1", "and does not disturb the first")
+	for i = 1, 40 do
+		Util.sessionMemory(fakePlugin, Instance.new("Folder"), newKey).set("s" .. i)
+	end
+	local count = 0
+	for _ in settings.RoLinkSessionMemory do
+		count += 1
+	end
+	check(count <= 16, "the memory is bounded, " .. count)
+	local broken = Util.sessionMemory({ GetSetting = function() error("no settings") end, SetSetting = function() error("no") end }, Instance.new("Folder"), newKey)
+	check(broken.get() == nil and pcall(broken.set, "x"), "settings that fail are survived")
+end
+
+-------------------------------------------------------------------------------
 H.section("Build: frames, repeat, mirror, span, refs")
 
 local spec = {
