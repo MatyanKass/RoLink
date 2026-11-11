@@ -447,6 +447,11 @@ export class SyncSession {
     let item = this.snap.items.find((i) => key(i.path) === k);
     let target: string | undefined;
     if (item?.file && item.source !== undefined) {
+      // Foo.json becomes a generated ModuleScript: its Luau must never be written over the JSON
+      if (!SCRIPT_RE.test(path.basename(item.file))) {
+        this.note(`Studio edit of ${ev.path.join("/")} not written back: it is generated from ${item.file}; edit that file instead`);
+        return;
+      }
       target = path.resolve(this.project.root, item.file);
     } else if (ev.type === "created") {
       const parentDir = this.snap.dirs.get(key(ev.path.slice(0, -1)));

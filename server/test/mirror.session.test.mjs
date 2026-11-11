@@ -794,3 +794,38 @@ test("a deep owner chain inside a model still gets a file", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a Studio delta that arrives during a failed resync is applied then, not replayed over a later dump", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-mirror-"));
+  const studio = place();
+  const ws = studio.find("Workspace").i;
+  let failNextDump = false;
+  let m;
+  const send = async (op, args) => {
+    if (op === "mirror" && args.action === "start" && failNextDump) {
+      failNextDump = false;
+      // Studio reports a new part while the dump is running, then the dump dies
+      const ghost = studio.add(ws, "Part", "Ghost", { props: {} });
+      m.onDelta({ upserts: [studio.wire(ghost)] });
+      throw new Error("Studio session closed");
+    }
+    return studio.send(op, args);
+  };
+  m = new MirrorSession({ dir, services: ["Workspace"], debounceMs: 30 }, send, "P");
+  await m.start();
+  try {
+    failNextDump = true;
+    await assert.rejects(m.resync("test"), /closed/);
+    assert.ok(fs.existsSync(path.join(dir, "Workspace")), "mirror still on disk");
+    await until(() => fs.existsSync(path.join(dir, "Workspace", "Ghost.Part.json")), "the delta from the failed dump is applied");
+    // the part is deleted in Studio while nothing is listening; the next dump is the truth
+    studio.nodes.delete(studio.find("Ghost").i);
+    await m.resync("test");
+    await until(() => !fs.existsSync(path.join(dir, "Workspace", "Ghost.Part.json")), "no stale delta brings the part back");
+    await sleep(150);
+    assert.ok(!fs.existsSync(path.join(dir, "Workspace", "Ghost.Part.json")));
+  } finally {
+    await m.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

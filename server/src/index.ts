@@ -10,6 +10,7 @@ import { Bridge, readToken } from "./bridge.js";
 import { HOST, PORT, VERSION, log } from "./config.js";
 import { Core, type ToolResult } from "./core.js";
 import { guideText } from "./guide.js";
+import { postRpc } from "./rpcclient.js";
 
 const bridge = new Bridge();
 let core: Core | undefined;
@@ -34,13 +35,9 @@ function ownerGone(e: any) {
 }
 
 async function forward(tool: string, args: Record<string, unknown>): Promise<ToolResult> {
-  const r = await fetch(`http://${HOST}:${PORT}/rpc`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-rolink-token": readToken() ?? "" },
-    body: JSON.stringify({ tool, args }),
-  });
+  const r = await postRpc(HOST, PORT, readToken() ?? "", { tool, args });
   if (r.status === 401) throw new RpcError(`the RoLink process on port ${PORT} rejected our token (is it another user's server?)`);
-  const body = (await r.json()) as { ok: boolean; result?: ToolResult; error?: string };
+  const body = r.body as { ok: boolean; result?: ToolResult; error?: string };
   if (!body.ok) throw new RpcError(body.error ?? "rpc failed");
   return body.result!;
 }

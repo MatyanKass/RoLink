@@ -203,6 +203,9 @@ export class Bridge extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         s.pending.delete(id);
+        // never polled yet: the caller has been told it failed, so Studio must not run it later
+        const queued = s.queue.findIndex((c) => c.id === id);
+        if (queued >= 0) s.queue.splice(queued, 1);
         reject(new PluginError(`Studio did not answer "${op}" within ${Math.round(timeoutMs / 1000)}s`));
       }, timeoutMs);
       s.pending.set(id, { resolve, reject, timer, op });
