@@ -634,3 +634,136 @@ do -- Ops wiring
 	check(not Ops.immediate.playtest_scenario, "scenarios use the worker")
 	check(not Ops.mutating.playtest_scenario, "scenarios are not undo steps")
 end
+
+-------------------------------------------------------------------------------
+H.section("View: a play-test client's camera script cannot silently win a screenshot")
+
+do
+	local Color3, Vector2 = roblox.Color3, roblox.Vector2
+	local function frameRun(edit)
+		local run = { bound = {}, late = {}, hb = {}, waiting = {}, edit = edit }
+		function run:IsEdit()
+			return self.edit
+		end
+		function run:IsClient()
+			return true
+		end
+		function run:BindToRenderStep(name, prio, fn)
+			self.bound[name] = { prio = prio, fn = fn }
+		end
+		function run:UnbindFromRenderStep(name)
+			self.bound[name] = nil
+		end
+		local function signal(list)
+			return {
+				Connect = function(_, fn)
+					local c = { fn = fn }
+					table.insert(list, c)
+					return {
+						Disconnect = function()
+							local i = table.find(list, c)
+							if i then
+								table.remove(list, i)
+							end
+						end,
+					}
+				end,
+				Wait = function()
+					table.insert(run.waiting, coroutine.running())
+					return coroutine.yield()
+				end,
+			}
+		end
+		run.Heartbeat = signal(run.hb)
+		-- stands for anything that runs after every bound render step
+		run.RenderStepped = signal(run.late)
+		function run.frame()
+			local steps = {}
+			for _, b in run.bound do
+				table.insert(steps, b)
+			end
+			table.sort(steps, function(a, b)
+				return a.prio < b.prio
+			end)
+			for _, b in steps do
+				b.fn()
+			end
+			for _, c in table.clone(run.late) do
+				c.fn()
+			end
+			for _, c in table.clone(run.hb) do
+				c.fn()
+			end
+			local waiting = run.waiting
+			run.waiting = {}
+			for _, th in waiting do
+				task.spawn(th)
+			end
+		end
+		return run
+	end
+
+	local cam = { CFrame = CFrame.new(), Focus = CFrame.new(), FieldOfView = 70, ViewportSize = Vector2.new(800, 600) }
+	local fakeWs = { CurrentCamera = cam }
+	local run = frameRun(false)
+	local coreGui = roblox.Instance.new("Folder")
+	local selection = { Get = function()
+		return {}
+	end, Set = function() end }
+	local View = H.requireWith("View", { game = fakeGame({ CoreGui = coreGui, RunService = run, Selection = selection }), workspace = fakeWs })
+	local pumping = true
+	task.spawn(function()
+		while pumping do
+			run.frame()
+			task.wait(0.002)
+		end
+	end)
+
+	-- the game's camera: Scriptable, set every frame at the camera priority
+	local gameCF = CFrame.new(0, 50, 0)
+	run:BindToRenderStep("GameCamera", 200, function()
+		cam.CFrame = gameCF
+	end)
+	local want = { position = { 10, 5, 10 }, lookAt = { 0, 0, 0 }, hideSelection = false }
+	local prep = View.prepare(want)
+	check(prep.cameraHeld == true, "the requested camera holds over the game's camera script")
+	H.near(cam.CFrame.Position, Vector3.new(10, 5, 10), "the camera is where it was asked to be")
+	local fin = View.finish({ prev = prep.prev })
+	check(type(fin) == "table" and fin.cameraHeld == true, "finish confirms it held until the end")
+	check(run.bound.RoLinkShotCameraHold == nil, "the hold is released")
+
+	-- something that sets the camera after every bound step wins: that must be reported
+	local late = run.RenderStepped:Connect(function()
+		cam.CFrame = gameCF
+	end)
+	local prep2 = View.prepare(want)
+	check(prep2.cameraHeld == false, "an overridden camera is reported, not claimed as success")
+	local fin2 = View.finish({ prev = prep2.prev })
+	check(type(fin2) == "table" and fin2.cameraHeld == false, "finish reports it too")
+	late:Disconnect()
+
+	-- "current" view moves nothing, so nothing is held
+	local prep3 = View.prepare({ view = "current", hideSelection = false })
+	check(prep3.cameraHeld == nil, "no hold when the camera is not moved")
+	View.finish({ prev = prep3.prev })
+
+	-- edit mode has no game camera: no hold
+	run.edit = true
+	local prep4 = View.prepare({ position = { 1, 2, 3 }, hideSelection = false })
+	check(prep4.cameraHeld == nil and run.bound.RoLinkShotCameraHold == nil, "edit mode does not hold the camera")
+	View.finish({ prev = prep4.prev })
+
+	View.markers({ on = true, kind = "probe" })
+	local gui = coreGui:FindFirstChild("RoLinkShotMarkers")
+	local squares = gui and gui:GetChildren() or {}
+	check(#squares == 2 and squares[1].BackgroundColor3 == Color3.fromRGB(0, 255, 255), "probe markers are cyan")
+	View.markers({ on = false })
+	check(coreGui:FindFirstChild("RoLinkShotMarkers") == nil, "probe markers go away")
+	View.setMarkers(true)
+	check(coreGui:FindFirstChild("RoLinkShotMarkers"):GetChildren()[1].BackgroundColor3 == Color3.fromRGB(255, 0, 255), "the captured context's markers stay magenta")
+	View.setMarkers(false)
+	pumping = false
+
+	local Ops = H.require("Ops")
+	check(Ops.concurrent.shot_markers == true and type(Ops.shot_markers) == "function", "probe markers do not wait behind a running scenario")
+end

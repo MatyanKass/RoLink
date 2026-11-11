@@ -72,13 +72,20 @@ export async function captureStudio(titleHint: string): Promise<{ image: Image; 
   }
 }
 
-const isMarker = (d: Buffer, i: number) => d[i] >= 245 && d[i + 1] <= 12 && d[i + 2] >= 245;
+/** target: the DataModel being captured (magenta). probe: another DataModel of the same test (cyan). */
+export type MarkerKind = "target" | "probe";
+type Matcher = (d: Buffer, i: number) => boolean;
+const MATCH: Record<MarkerKind, Matcher> = {
+  target: (d, i) => d[i] >= 245 && d[i + 1] <= 12 && d[i + 2] >= 245,
+  probe: (d, i) => d[i] <= 12 && d[i + 1] >= 245 && d[i + 2] >= 245,
+};
 
 /**
- * The plugin draws magenta squares in the viewport's top-left and bottom-right
+ * The plugin draws small squares in the viewport's top-left and bottom-right
  * corners. Find them and crop to the rectangle they span.
  */
-export function cropToMarkers(img: Image): { image: Image; found: boolean } {
+export function cropToMarkers(img: Image, kind: MarkerKind = "target"): { image: Image; found: boolean } {
+  const isMarker = MATCH[kind];
   const { width: w, height: h, data } = img;
   let minX = w,
     minY = h,
@@ -108,12 +115,12 @@ export function cropToMarkers(img: Image): { image: Image; found: boolean } {
   }
   // paint the markers over with the pixel just outside each square
   const cleaned: Image = { width: cw, height: ch, data: out };
-  paintOver(cleaned, 0, 0, 1, 1);
-  paintOver(cleaned, cw - 1, ch - 1, -1, -1);
+  paintOver(cleaned, 0, 0, 1, 1, isMarker);
+  paintOver(cleaned, cw - 1, ch - 1, -1, -1, isMarker);
   return { image: cleaned, found: true };
 }
 
-function paintOver(img: Image, cx: number, cy: number, dx: number, dy: number) {
+function paintOver(img: Image, cx: number, cy: number, dx: number, dy: number, isMarker: Matcher) {
   const { width: w, height: h, data } = img;
   // marker extent from this corner
   let size = 0;

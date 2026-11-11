@@ -1,5 +1,7 @@
 -- Camera framing for screenshots. The server captures the Studio window; to
 -- crop it to the 3D viewport we draw two small magenta markers in its corners.
+-- During a play-test the other DataModels draw cyan "probe" markers, so the server
+-- can tell when the requested one is not the view Studio is showing.
 
 local CoreGui = game:GetService("CoreGui")
 local RunService = game:GetService("RunService")
@@ -13,6 +15,13 @@ local View = {}
 
 local MARKER_NAME = "RoLinkShotMarkers"
 local MARKER_SIZE = 6
+local MARKER_COLORS = {
+	target = Color3.fromRGB(255, 0, 255),
+	probe = Color3.fromRGB(0, 255, 255),
+}
+local HOLD_NAME = "RoLinkShotCameraHold"
+-- after the game's own camera (RenderPriority.Camera = 200) and anything bound at Last
+local HOLD_PRIORITY = Enum.RenderPriority.Last.Value + 100
 
 local function camera()
 	return workspace.CurrentCamera
@@ -24,7 +33,7 @@ local function waitFrames(n)
 	end
 end
 
-function View.setMarkers(on)
+function View.setMarkers(on, kind)
 	local old = CoreGui:FindFirstChild(MARKER_NAME)
 	if old then
 		old:Destroy()
@@ -32,6 +41,7 @@ function View.setMarkers(on)
 	if not on then
 		return
 	end
+	local color = MARKER_COLORS[kind or "target"] or MARKER_COLORS.target
 	local gui = Instance.new("ScreenGui")
 	gui.Name = MARKER_NAME
 	gui.IgnoreGuiInset = true
@@ -43,7 +53,7 @@ function View.setMarkers(on)
 	for _, corner in { Vector2.new(0, 0), Vector2.new(1, 1) } do
 		local f = Instance.new("Frame")
 		f.BorderSizePixel = 0
-		f.BackgroundColor3 = Color3.fromRGB(255, 0, 255)
+		f.BackgroundColor3 = color
 		f.Size = UDim2.fromOffset(MARKER_SIZE, MARKER_SIZE)
 		f.AnchorPoint = corner
 		f.Position = UDim2.fromScale(corner.X, corner.Y)
@@ -188,6 +198,72 @@ function View.frame(args)
 	cam.Focus = CFrame.new(b.center)
 end
 
+local function sameCFrame(a, b)
+	return (a.Position - b.Position).Magnitude < 0.01 and a.LookVector:Dot(b.LookVector) > 0.9999 and a.UpVector:Dot(b.UpVector) > 0.9999
+end
+
+-- A play-test client's camera scripts set the camera every frame. While a capture is
+-- prepared the requested camera is set again after them each frame, and every Heartbeat
+-- checks that it held; `overridden` records a frame where something else won.
+local hold = nil
+
+local function stopHold()
+	local h = hold
+	hold = nil
+	if not h then
+		return nil
+	end
+	if h.bound then
+		pcall(function()
+			RunService:UnbindFromRenderStep(HOLD_NAME)
+		end)
+	end
+	for _, c in h.conns do
+		c:Disconnect()
+	end
+	return h
+end
+
+local function startHold(cam, want, fov)
+	stopHold()
+	local h = { want = want, fov = fov, overridden = false, frames = 0, conns = {} }
+	local function apply()
+		if workspace.CurrentCamera ~= cam then
+			return
+		end
+		cam.CFrame = want
+		if fov then
+			cam.FieldOfView = fov
+		end
+	end
+	h.bound = pcall(function()
+		RunService:BindToRenderStep(HOLD_NAME, HOLD_PRIORITY, apply)
+	end)
+	if not h.bound then
+		table.insert(h.conns, RunService.RenderStepped:Connect(apply))
+	end
+	table.insert(
+		h.conns,
+		RunService.Heartbeat:Connect(function()
+			h.frames += 1
+			if workspace.CurrentCamera ~= cam or not sameCFrame(cam.CFrame, want) then
+				h.overridden = true
+			end
+		end)
+	)
+	hold = h
+	return h
+end
+
+-- Only a running game moves the camera on its own.
+local function playClient()
+	return not RunService:IsEdit() and RunService:IsClient()
+end
+
+local function movesCamera(args)
+	return args.cframe ~= nil or args.position ~= nil or args.fov ~= nil or (args.view or "iso") ~= "current"
+end
+
 -- Prepare the viewport for a capture. Returns what's needed to restore it.
 function View.prepare(args)
 	local cam = camera()
@@ -211,15 +287,37 @@ function View.prepare(args)
 		end)
 		error(frameErr, 0)
 	end
+	local h = nil
+	if playClient() and movesCamera(args) then
+		h = startHold(cam, cam.CFrame, args.fov and cam.FieldOfView or nil)
+	else
+		stopHold()
+	end
 	View.setMarkers(args.markers ~= false)
 	waitFrames(4)
 	task.wait(0.12)
 	local vp = cam.ViewportSize
-	return { prev = prev, viewport = { vp.X, vp.Y }, camera = Codec.encode(cam.CFrame) }
+	local out = { prev = prev, viewport = { vp.X, vp.Y }, camera = Codec.encode(cam.CFrame) }
+	if h then
+		-- false: the game's camera won at least one frame, so the capture may not show the requested view
+		out.cameraHeld = not h.overridden and h.frames > 0
+	end
+	return out
+end
+
+-- Markers only, no camera: what another DataModel of a running test draws while one is captured.
+function View.markers(args)
+	View.setMarkers(args.on == true, args.kind)
+	if args.on == true then
+		waitFrames(2)
+		task.wait(0.05)
+	end
+	return true
 end
 
 function View.finish(args)
 	View.setMarkers(false)
+	local h = stopHold()
 	local prev = args.prev
 	if prev and args.restore ~= false then
 		local cam = camera()
@@ -240,6 +338,9 @@ function View.finish(args)
 			end
 		end
 		Selection:Set(list)
+	end
+	if h then
+		return { cameraHeld = not h.overridden and h.frames > 0, frames = h.frames }
 	end
 	return true
 end

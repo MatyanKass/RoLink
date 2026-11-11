@@ -782,6 +782,10 @@ function Ops.shot_finish(args)
 	return View.finish(args)
 end
 
+function Ops.shot_markers(args)
+	return View.markers(args)
+end
+
 function Ops.camera(args)
 	if args.set then
 		View.frame(args.set)
@@ -917,6 +921,8 @@ for _, name in { "align", "distribute", "weld_model", "set_collision_groups", "g
 end
 -- off the worker queue, so a scenario can generate the load being measured
 Ops.concurrent.perf_stats = true
+-- drawn in the other contexts of a test during a capture: must not wait behind a scenario
+Ops.concurrent.shot_markers = true
 Ops.concurrent.profile_scripts = true
 
 -- ------------------------------------------------------------------ dispatch

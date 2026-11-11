@@ -221,6 +221,94 @@ test("a session busy with a long scenario is not dropped for not polling (field 
   assert.ok(!bridge.sessions.has(sid), "an idle silent session still times out");
 });
 
+// ---------------------------------------------------------------- screenshots during a play-test
+
+function shotPlugin(session, prep = {}) {
+  const ops = [];
+  let stop = false;
+  const done = (async () => {
+    while (!stop) {
+      const r = await fetch(`${BASE}/plugin/poll?s=${session}`);
+      if (r.status !== 200) return;
+      const { commands } = await r.json();
+      for (const c of commands) {
+        ops.push(c);
+        let result = true;
+        if (c.op === "shot_prepare") result = { prev: { cframe: { p: [0, 0, 0] } }, viewport: [800, 600], ...prep };
+        await postJson("/plugin/result", { s: session, id: c.id, ok: true, result });
+      }
+    }
+  })();
+  return { ops, end: async () => { stop = true; await bye(session); await done; } };
+}
+
+/** A fake Studio window: grey, with 6 px squares in two corners of a 300×214 "viewport". */
+function windowImage(kind) {
+  const w = 400;
+  const h = 300;
+  const data = Buffer.alloc(w * h * 4, 90);
+  const color = kind === "target" ? [255, 0, 255] : kind === "probe" ? [0, 255, 255] : null;
+  if (color) {
+    for (const [x0, y0] of [[50, 40], [344, 248]]) {
+      for (let y = y0; y < y0 + 6; y++) for (let x = x0; x < x0 + 6; x++) data.set([...color, 255], (y * w + x) * 4);
+    }
+  }
+  return { width: w, height: h, data };
+}
+
+async function playtestSessions(name) {
+  const placeId = ++placeSeq;
+  const join = (context) => postJson("/plugin/hello", { context, placeName: name, placeId, gameId: 2, pluginVersion: "t" }).then((b) => b.session);
+  return { edit: await join("edit"), server: await join("server"), client: await join("client") };
+}
+
+test("screenshot of the edit view while a test runs fails clearly instead of returning the whole window (field report)", async () => {
+  const name = `Shot${placeSeq}`;
+  const ids = await playtestSessions(name);
+  const plugins = Object.fromEntries(Object.entries(ids).map(([k, id]) => [k, shotPlugin(id)]));
+  // Studio shows the client: only the cyan probe squares are on screen
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }), async () => ({ image: windowImage("probe"), title: "x" }));
+  await assert.rejects(core.call("screenshot", { place: name, view: "iso" }), /edit view is not on screen.*context "client"/s);
+  const ops = (k, op) => plugins[k].ops.filter((o) => o.op === op);
+  assert.equal(ops("edit", "shot_finish").length, 1, "the edit camera is restored");
+  for (const k of ["server", "client"]) {
+    assert.deepEqual(ops(k, "shot_markers").map((o) => o.args.on), [true, false], `${k} drew probe markers, then removed them`);
+    assert.equal(ops(k, "shot_markers")[0].args.kind, "probe");
+  }
+  await assert.rejects(core.call("screenshot", { place: name, context: "server" }), /server view is not on screen/);
+  for (const p of Object.values(plugins)) await p.end();
+});
+
+test("screenshot of the client view crops to it, and an overridden camera is reported, not claimed (field report)", async () => {
+  const name = `Cam${placeSeq}`;
+  const ids = await playtestSessions(name);
+  const plugins = { edit: shotPlugin(ids.edit), server: shotPlugin(ids.server), client: shotPlugin(ids.client, { cameraHeld: false }) };
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }), async () => ({ image: windowImage("target"), title: "x" }));
+  const r = await core.call("screenshot", { place: name, context: "client", position: [10, 5, 10], lookAt: [0, 0, 0] });
+  assert.equal(r.images.length, 1);
+  assert.match(r.images[0].label, /^custom 300×214$/, "cropped to the viewport between the markers");
+  assert.match(r.text, /^WARNING: the game's own camera script moved the camera/);
+  for (const p of Object.values(plugins)) await p.end();
+});
+
+test("screenshot with no test running keeps the whole-window fallback; during a test a missing viewport is an error", async () => {
+  const placeId = ++placeSeq;
+  const name = `Plain${placeId}`;
+  const edit = await postJson("/plugin/hello", { context: "edit", placeName: name, placeId, gameId: 2, pluginVersion: "t" }).then((b) => b.session);
+  const p = shotPlugin(edit);
+  const core = new Core(bridge, async () => ({ version: 1, classes: {} }), async () => ({ image: windowImage(null), title: "x" }));
+  const r = await core.call("screenshot", { place: name });
+  assert.match(r.text, /markers not found, returning the whole Studio window/);
+  assert.equal(p.ops.filter((o) => o.op === "shot_markers").length, 0, "no probes without a test");
+  await p.end();
+
+  const miss = `Miss${placeSeq}`;
+  const ids = await playtestSessions(miss);
+  const plugins = Object.values(ids).map((id) => shotPlugin(id));
+  await assert.rejects(core.call("screenshot", { place: miss, context: "client" }), /Could not find the client viewport/);
+  for (const q of plugins) await q.end();
+});
+
 test("mirror_stop names the edits that never reached Studio", async () => {
   const core = new Core(bridge, async () => ({ version: 1, classes: {} }));
   const sid = await hello("Gone", ++placeSeq);

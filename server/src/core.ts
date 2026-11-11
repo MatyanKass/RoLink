@@ -4,10 +4,10 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { Bridge, type Context, type SessionBinding, type SessionInfo } from "./bridge.js";
+import { Bridge, PluginError, type Context, type SessionBinding, type SessionInfo } from "./bridge.js";
 import { getApi } from "./apidump.js";
-import { log } from "./config.js";
-import { captureStudio, cropToMarkers, downscale, toJpeg } from "./screenshot.js";
+import { POLL_HOLD_MS, log } from "./config.js";
+import { type Image, captureStudio, cropToMarkers, downscale, toJpeg } from "./screenshot.js";
 import { Project, SyncSession, findProjectFile } from "./sync.js";
 import { DEFAULT_SERVICES, MirrorSession, projectServices } from "./mirror.js";
 import { randomUUID } from "node:crypto";
@@ -39,7 +39,12 @@ export class Core {
   private shotLock = Promise.resolve();
   private readonly playtests: Playtests;
 
-  constructor(bridge: Bridge, private readonly api: () => Promise<unknown> = getApi) {
+  constructor(
+    bridge: Bridge,
+    private readonly api: () => Promise<unknown> = getApi,
+    /** the Studio window grab; replaced in tests */
+    private readonly capture: (titleHint: string) => Promise<{ image: Image; title: string }> = captureStudio,
+  ) {
     this.bridge = bridge;
     this.playtests = new Playtests(bridge);
     bridge.apiProvider = () => this.api();
@@ -273,13 +278,33 @@ export class Core {
     }
   }
 
+  /**
+   * The other DataModels of a running play-test of the same place. They draw cyan probe markers
+   * during a capture, so a capture that shows one of them instead of the requested context is
+   * recognised instead of returned as if it were the requested view.
+   */
+  private probeSessions(target: SessionInfo): SessionInfo[] {
+    const now = Date.now();
+    const live = this.bridge
+      .list()
+      .filter((x) => x.id !== target.id && !x.duplicate && x.placeId === target.placeId && (x.busy || now - x.lastSeen <= POLL_HOLD_MS + 5_000));
+    const testRunning = target.context !== "edit" || live.some((x) => x.context !== "edit");
+    return testRunning ? live : [];
+  }
+
   private async screenshotInner(args: Args): Promise<ToolResult> {
     const s = this.session(args);
+    const ctx = s.context;
     const views: string[] = args.cframe || args.position ? ["custom"] : (args.views ?? [args.view ?? (args.targets ? "iso" : "current")]);
     const maxW = Math.min(args.maxWidth ?? 1280, 2560);
     const images: ImageOut[] = [];
     const notes: string[] = [];
+    const warnings: string[] = [];
+    const probes = this.probeSessions(s);
+    const testRunning = ctx !== "edit" || probes.length > 0;
+    let probesOn = false;
     let restore: unknown;
+    let finish: any;
     try {
       for (const view of views) {
         const prep = await this.bridge.send(
@@ -298,16 +323,32 @@ export class Core {
           30_000,
         );
         restore ??= prep.prev;
-        const shot = await captureStudio(s.placeName);
+        if (probes.length && !probesOn) {
+          probesOn = true;
+          await Promise.all(probes.map((p) => this.bridge.send(p.id, "shot_markers", { on: true, kind: "probe" }, 5_000).catch(() => {})));
+        }
+        const shot = await this.capture(s.placeName);
         const crop = cropToMarkers(shot.image);
-        if (!crop.found) notes.push(`${view}: viewport markers not found, returning the whole Studio window`);
+        if (!crop.found) {
+          if (cropToMarkers(shot.image, "probe").found) throw new PluginError(notOnScreen(ctx));
+          if (testRunning) {
+            throw new PluginError(
+              `Could not find the ${ctx} viewport in the captured Studio window, so no image is returned (a whole-window capture would not show the ${ctx} view). Studio may be minimized or covered by another window, or showing a view other than ${ctx}.`,
+            );
+          }
+          notes.push(`${view}: viewport markers not found, returning the whole Studio window`);
+        }
+        if (prep.cameraHeld === false) warnings.push(cameraOverridden(view));
         const img = downscale(crop.image, maxW, Math.round(maxW * 0.75));
         images.push({ data: toJpeg(img).toString("base64"), mimeType: "image/jpeg", label: `${view} ${img.width}×${img.height}` });
       }
     } finally {
-      await this.bridge.send(s.id, "shot_finish", { prev: restore, restore: args.restore !== false }, 15_000).catch(() => {});
+      if (probesOn) await Promise.all(probes.map((p) => this.bridge.send(p.id, "shot_markers", { on: false }, 5_000).catch(() => {})));
+      finish = await this.bridge.send(s.id, "shot_finish", { prev: restore, restore: args.restore !== false }, 15_000).catch(() => undefined);
     }
-    return { text: [`${images.length} screenshot(s): ${images.map((i) => i.label).join(", ")}`, ...notes].join("\n"), images };
+    if (finish?.cameraHeld === false && !warnings.length) warnings.push(cameraOverridden(views[views.length - 1]));
+    const head = `${images.length} screenshot(s) of the ${ctx} view: ${images.map((i) => i.label).join(", ")}`;
+    return { text: [...warnings, head, ...notes].join("\n"), images };
   }
 
   private resolveFile(file: string) {
@@ -498,6 +539,19 @@ export class Core {
     this.sync = undefined;
     return { text: "sync stopped" };
   }
+}
+
+function notOnScreen(ctx: Context): string {
+  const advice: Record<Context, string> = {
+    edit: 'While a play-test runs, Studio shows the test, not the edit-mode viewport. Use context "client" (what the player sees) or "server", or stop the test with playtest_stop to capture edit mode.',
+    server: `Studio is showing the client's view. Use context "client", or ask the user to switch the test view to Server (Test tab, Client/Server toggle).`,
+    client: "Studio is showing another view of the test (the server, or another client's window). Ask the user to switch the view to the client, or use the context Studio shows.",
+  };
+  return `The ${ctx} view is not on screen, so no image is returned (it would show another DataModel). ${advice[ctx]}`;
+}
+
+function cameraOverridden(view: string): string {
+  return `WARNING: the game's own camera script moved the camera during the capture, so the "${view}" image shows the game's camera, not the requested one. In a scenario, set workspace.CurrentCamera.CameraType to Scriptable and stop the game's camera updates first, or take the screenshot in edit mode.`;
 }
 
 /** A JSON null would vanish on the way into Luau, so it is sent as the explicit "clear" form. */
