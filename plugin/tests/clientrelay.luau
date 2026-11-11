@@ -253,3 +253,48 @@ do
 	end), "the later request is answered")
 	check(second[1] == 200 and json.decode(second[2]).commands ~= nil, "a captured reply does not answer a later request")
 end
+
+H.section("ClientRelay: a look-alike RemoteEvent made by game code")
+
+do
+	local player = { Name = "P", UserId = 42 }
+	local real = fakeRemote(player)
+	Relay.attachServer(real, { PlayerRemoving = fakeSignal() }, function(_, path)
+		if path == "/plugin/hello" then
+			return 200, json.encode({ session = "s1" })
+		end
+		return 200, json.encode({ commands = {} })
+	end, json, function()
+		return KEY
+	end, "server-nonce")
+	-- a game script copies the name and the public nonce, but cannot sign a reply
+	local decoy = fakeRemote(player)
+	decoy:SetAttribute("nonce", "server-nonce")
+	local offered = {}
+	local request = Relay.attachClient(function(rejected)
+		for _, r in { decoy, real } do
+			if not rejected[r] then
+				table.insert(offered, r == decoy and "decoy" or "real")
+				return r
+			end
+		end
+		return nil
+	end, function()
+		return KEY
+	end, function()
+		return player.UserId
+	end, "client-nonce", { verifyTimeout = 0.05 })
+
+	local first, second
+	task.spawn(function()
+		first = { request("POST", "/plugin/hello", json.encode({ context = "client" })) }
+		second = { request("POST", "/plugin/hello", json.encode({ context = "client" })) }
+	end)
+	check(pollUntil(function()
+		return second ~= nil
+	end), "both requests return")
+	check(first[1] == nil, "the request sent to the look-alike fails instead of hanging")
+	check(#decoy.sentToServer == 1, "the look-alike saw one request")
+	check(second[1] == 200 and json.decode(second[2]).session == "s1", "the next request finds the genuine relay")
+	check(offered[1] == "decoy" and offered[2] == "real", "the look-alike is not offered again: " .. table.concat(offered, ","))
+end

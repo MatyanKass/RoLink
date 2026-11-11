@@ -75,8 +75,21 @@ end
 -- A play-test client cannot use HttpService; its traffic goes through the server context.
 local send = sendDirect
 if context == "client" then
-	send = ClientRelay.attachClient(function()
-		return game:GetService("ReplicatedStorage"):WaitForChild(ClientRelay.NAME, 30)
+	send = ClientRelay.attachClient(function(rejected)
+		-- game code can make a same-named RemoteEvent; take the first one not yet rejected
+		local storage = game:GetService("ReplicatedStorage")
+		local deadline = os.clock() + 30
+		while true do
+			for _, c in storage:GetChildren() do
+				if c.Name == ClientRelay.NAME and c:IsA("RemoteEvent") and not rejected[c] then
+					return c
+				end
+			end
+			if os.clock() >= deadline then
+				return nil
+			end
+			task.wait(0.25)
+		end
 	end, relayKey, function()
 		local players = game:GetService("Players")
 		while not players.LocalPlayer do
@@ -490,10 +503,23 @@ else
 	-- Play-test DataModels connect too, so runtime state can be inspected.
 	if plugin:GetSetting("RoLinkAutoConnect") ~= false and plugin:GetSetting("RoLinkPlayConnect") ~= false then
 		if context == "server" then
+			local storage = game:GetService("ReplicatedStorage")
 			local remote = Instance.new("RemoteEvent")
 			remote.Name = ClientRelay.NAME
 			remote.Archivable = false
-			remote.Parent = game:GetService("ReplicatedStorage")
+			-- a same-named child made by game code would catch the client's traffic first
+			local function evict(child)
+				if child ~= remote and child.Name == ClientRelay.NAME then
+					pcall(function()
+						child.Name = ClientRelay.NAME .. "_foreign"
+					end)
+				end
+			end
+			for _, child in storage:GetChildren() do
+				evict(child)
+			end
+			storage.ChildAdded:Connect(evict)
+			remote.Parent = storage
 			ClientRelay.attachServer(remote, game:GetService("Players"), sendDirect, {
 				decode = function(text)
 					return HttpService:JSONDecode(text)

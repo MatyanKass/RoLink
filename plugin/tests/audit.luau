@@ -627,6 +627,10 @@ do
 	end
 	function fakePlugin:SetSetting() end
 	run.PlayerRemoving = { Connect = function() end }
+	run.ChildAdded = { Connect = function() end }
+	function run:GetChildren()
+		return {}
+	end
 	local fakeRelay = { OnServerEvent = { Connect = function() end }, SetAttribute = function() end }
 	H.requireWith("Main.server", {
 		game = fakeGame,
