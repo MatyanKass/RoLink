@@ -543,3 +543,81 @@ test("forwarded tool calls use a client without fetch's 300 s response limit", a
   await assert.rejects(postRpc("127.0.0.1", port, "tok", {}), (e) => e.code === "ECONNREFUSED");
   assert.doesNotMatch(fs.readFileSync(path.join(here, "..", "src", "index.ts"), "utf8"), /fetch\(`http:\/\/\$\{HOST\}:\$\{PORT\}\/rpc/);
 });
+
+test("sync: a $path outside the project and links out of it are not read", async () => {
+  const { Project } = await import("../dist/sync.js");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-escape-"));
+  const dir = path.join(base, "repo");
+  const outside = path.join(base, "secret");
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "Stolen.luau"), "SECRET\n");
+  fs.writeFileSync(path.join(dir, "src", "Ok.luau"), "return 1\n");
+  fs.symlinkSync(outside, path.join(dir, "src", "Linked"), "junction");
+  fs.writeFileSync(
+    path.join(dir, "default.project.json"),
+    JSON.stringify({ name: "P", tree: { $className: "DataModel", ReplicatedStorage: { Shared: { $path: "src" }, Up: { $path: "../secret" }, Abs: { $path: outside } } } }),
+  );
+  try {
+    const project = new Project(path.join(dir, "default.project.json"));
+    const snap = await project.snapshot();
+    const names = snap.items.map((i) => i.path.join("/"));
+    assert.ok(names.includes("ReplicatedStorage/Shared/Ok"), names.join(","));
+    assert.ok(!snap.items.some((i) => (i.source ?? "").includes("SECRET")), names.join(","));
+    assert.ok(!names.some((n) => /Up|Abs|Linked/.test(n)), names.join(","));
+    assert.equal(snap.warnings.filter((w) => /outside the project/.test(w)).length, 2, snap.warnings.join("\n"));
+    assert.ok(snap.warnings.some((w) => /symbolic links are not followed/.test(w)));
+    const watched = await project.watchedPaths();
+    assert.ok(!watched.some((w) => w.startsWith(outside)), watched.join(","));
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("sync: a Studio edit is never written through a link to a file outside the project", async (t) => {
+  const { Project } = await import("../dist/sync.js");
+  const dir = syncProject();
+  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rolink-outside-")), "bashrc");
+  fs.writeFileSync(outside, "original\n");
+  const session = new SyncSession(new Project(path.join(dir, "default.project.json")), async () => ({ created: 0, updated: 0, removed: 0 }), "P");
+  await session.start();
+  try {
+    const mod = path.join(dir, "src", "Mod.luau");
+    fs.rmSync(mod);
+    try {
+      fs.symlinkSync(outside, mod, "file");
+    } catch (e) {
+      t.skip(`cannot create file symlinks here (${e.code})`);
+      return;
+    }
+    await session.onPluginEvent({ type: "source", path: ["ReplicatedStorage", "Shared", "Mod"], class: "ModuleScript", source: "pwned\n" });
+    assert.equal(fs.readFileSync(outside, "utf8"), "original\n");
+    assert.ok(session.status().recent.some((l) => /refused to write/.test(l)));
+  } finally {
+    await session.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(outside), { recursive: true, force: true });
+  }
+});
+
+test("sync: a Studio edit is never written into a folder that now links outside the project", async () => {
+  const { Project } = await import("../dist/sync.js");
+  const dir = syncProject();
+  fs.mkdirSync(path.join(dir, "src", "Sub"));
+  fs.writeFileSync(path.join(dir, "src", "Sub", "X.luau"), "return 'x'\n");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "rolink-outside-"));
+  fs.writeFileSync(path.join(outside, "X.luau"), "original\n");
+  const session = new SyncSession(new Project(path.join(dir, "default.project.json")), async () => ({ created: 0, updated: 0, removed: 0 }), "P");
+  await session.start();
+  try {
+    fs.rmSync(path.join(dir, "src", "Sub"), { recursive: true });
+    fs.symlinkSync(outside, path.join(dir, "src", "Sub"), "junction");
+    await session.onPluginEvent({ type: "source", path: ["ReplicatedStorage", "Shared", "Sub", "X"], class: "ModuleScript", source: "pwned\n" });
+    assert.equal(fs.readFileSync(path.join(outside, "X.luau"), "utf8"), "original\n");
+    assert.ok(session.status().recent.some((l) => /refused to write/.test(l)));
+  } finally {
+    await session.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
