@@ -6,7 +6,9 @@ import type { Log, PublishConfig, Redactor } from "./config.js";
 import { CloudError, type AssetQuota, type DataStoreEntry, type EntryAddress, type OpenCloud } from "./opencloud.js";
 import { DIALOG_TIMEOUT_MS, requireNativeYes, type NativeConfirm } from "./nativeconfirm.js";
 
-const PREVIEW_CHARS = 300;
+const PREVIEW_CHARS = 400;
+/** the value being written gets most of the dialog: what is cut off cannot be checked */
+const NEW_VALUE_CHARS = 900;
 const NAME_CHARS = 120;
 const NAME_RE = /^\w+$/;
 
@@ -42,16 +44,32 @@ function text(name: string, v: unknown): string {
   return v;
 }
 
+/**
+ * The dialog drops invisible, bidi and control characters, so two different keys could
+ * look the same there. Spell them out instead: what is shown is what is written.
+ */
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+export function visible(s: string): string {
+  return s.replace(INVISIBLE, (c) => `\\u{${c.codePointAt(0)!.toString(16).toUpperCase()}}`);
+}
+
+function cut(s: string, max: number, total: number): string {
+  if (s.length <= max) return s;
+  let end = max;
+  const last = s.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${s.slice(0, end)}… (${total} characters in total, the rest is NOT shown)`;
+}
+
 /** JSON keeps line breaks in a value from being laid out as dialog text. */
-function preview(v: unknown): string {
-  const s = JSON.stringify(v) ?? "null";
-  return s.length > PREVIEW_CHARS ? `${s.slice(0, PREVIEW_CHARS)}… (${s.length} characters in total)` : s;
+function preview(v: unknown, max = PREVIEW_CHARS): string {
+  const s = visible(JSON.stringify(v) ?? "null");
+  return cut(s, max, s.length);
 }
 
 /** A store, scope or key name for the dialog: long names must not push the rest out of it. */
 function shown(name: string): string {
-  const s = JSON.stringify(name);
-  return s.length > NAME_CHARS ? `${s.slice(0, NAME_CHARS)}… (${name.length} characters in total)` : s;
+  return cut(visible(JSON.stringify(name)), NAME_CHARS, name.length);
 }
 
 function userPath(u: string | number): string {
@@ -189,7 +207,7 @@ export class CloudTools {
       [
         this.where(a),
         before ? `Current value: ${preview(before.value)}` : "This is a new entry: the key does not exist yet.",
-        `New value: ${preview(args.value)}`,
+        `New value: ${preview(args.value, NEW_VALUE_CHARS)}`,
         "Это изменит данные в живом хранилище игры.",
       ].join("\n\n"),
       "Write value",

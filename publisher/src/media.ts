@@ -47,6 +47,8 @@ export async function inspectMedia(file: string, kind: AssetKind): Promise<Media
   if (stat.size > MAX_FILE_BYTES) throw new Error(`File is ${(stat.size / 1048576).toFixed(1)} MiB; Roblox accepts up to 20 MB per asset.`);
 
   const data = await fsp.readFile(file);
+  // the file can grow between stat and read
+  if (data.length > MAX_FILE_BYTES) throw new Error(`File is ${(data.length / 1048576).toFixed(1)} MiB; Roblox accepts up to 20 MB per asset.`);
   const info: MediaInfo = { file, ext, sizeBytes: data.length, sha256: sha256(data), contentType, data };
   if (kind === "animation") {
     if (data.toString("latin1", 0, 8) !== "<roblox!") throw new Error(`${path.basename(file)} does not look like a binary .rbxm file.`);

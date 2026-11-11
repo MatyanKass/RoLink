@@ -40,6 +40,8 @@ export class Poller {
   private timer?: NodeJS.Timeout;
   private running = false;
   private cloudPausedUntil = 0;
+  /** per entry: publish_asset and the timer must not both create a placeholder */
+  private inFlight = new Map<string, Promise<void>>();
 
   constructor(private deps: PollerDeps) {}
 
@@ -83,7 +85,19 @@ export class Poller {
   }
 
   /** Advances one entry as far as it can go right now. Never throws for remote failures. */
-  async processEntry(prepareId: string, known?: Operation) {
+  async processEntry(prepareId: string, known?: Operation): Promise<void> {
+    // wait for a run already going on this entry, then run against the state it left
+    for (let busy = this.inFlight.get(prepareId); busy; busy = this.inFlight.get(prepareId)) await busy.catch(() => {});
+    const run = this.advance(prepareId, known);
+    this.inFlight.set(prepareId, run);
+    try {
+      await run;
+    } finally {
+      if (this.inFlight.get(prepareId) === run) this.inFlight.delete(prepareId);
+    }
+  }
+
+  private async advance(prepareId: string, known?: Operation) {
     let e = this.entry(prepareId);
     if (!e) return;
     if (e.status === "uploading") {
