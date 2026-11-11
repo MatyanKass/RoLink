@@ -463,8 +463,17 @@ function Ops.set(args)
 	for _, e in edits do
 		for _, inst in Paths.resolveMany(e.path) do
 			local where = Paths.of(inst)
+			-- one locked or odd instance becomes a warning instead of rolling back every edit
+			local function try(what, fn)
+				local ok, err = pcall(fn)
+				if not ok then
+					table.insert(warnings, where .. " " .. what .. ": " .. tostring(err))
+				end
+			end
 			if e.name then
-				inst.Name = e.name
+				try("name", function()
+					inst.Name = e.name
+				end)
 			end
 			for prop, val in e.props or {} do
 				local clearsRef = type(val) == "table"
@@ -507,7 +516,9 @@ function Ops.set(args)
 			end
 			for k, v in e.attrs or {} do
 				if v == false and e.removeFalseAttrs then
-					inst:SetAttribute(k, nil)
+					try("attr " .. tostring(k), function()
+						inst:SetAttribute(k, nil)
+					end)
 				else
 					local ok, err = pcall(function()
 						inst:SetAttribute(k, Codec.decodeAttr(v))
@@ -518,13 +529,19 @@ function Ops.set(args)
 				end
 			end
 			for _, t in e.tags or {} do
-				inst:AddTag(t)
+				try("tag " .. tostring(t), function()
+					inst:AddTag(t)
+				end)
 			end
 			for _, t in e.untag or {} do
-				inst:RemoveTag(t)
+				try("untag " .. tostring(t), function()
+					inst:RemoveTag(t)
+				end)
 			end
 			if e.source ~= nil and inst:IsA("LuaSourceContainer") then
-				inst.Source = e.source
+				try("Source", function()
+					inst.Source = e.source
+				end)
 			end
 			updated += 1
 		end
@@ -555,6 +572,9 @@ function Ops.clone(args)
 	local created = {}
 	for i = 1, count do
 		local c = src:Clone()
+		if c == nil then
+			error(Paths.of(src) .. " cannot be cloned: its Archivable is false", 0)
+		end
 		if args.name then
 			c.Name = string.gsub(args.name, "%%d", tostring(i))
 		end
@@ -783,10 +803,14 @@ function Ops.import_rbxm(args)
 	local parent = args.parent and Paths.one(args.parent) or workspace
 	local SerializationService = game:GetService("SerializationService")
 	local list = SerializationService:DeserializeInstancesAsync(Util.base64Decode(args.data))
+	-- only children from before the import are replaced, not instances it just added
+	local before = args.replace and parent:GetChildren() or nil
 	for _, inst in list do
-		if args.replace then
-			for _, old in parent:GetChildren() do
+		if before then
+			for i = #before, 1, -1 do
+				local old = before[i]
 				if old.Name == inst.Name then
+					table.remove(before, i)
 					old:Destroy()
 				end
 			end

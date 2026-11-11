@@ -203,7 +203,14 @@ function View.prepare(args)
 		end
 		Selection:Set({})
 	end
-	View.frame(args)
+	local okFrame, frameErr = pcall(View.frame, args)
+	if not okFrame then
+		-- no capture follows, so nothing else would restore what was just changed
+		pcall(function()
+			View.finish({ prev = prev })
+		end)
+		error(frameErr, 0)
+	end
 	View.setMarkers(args.markers ~= false)
 	waitFrames(4)
 	task.wait(0.12)

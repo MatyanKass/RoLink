@@ -173,11 +173,29 @@ end
 
 -- Studio -> server --------------------------------------------------------
 
+local flushing = false
+local flushNow
+
 local function flush()
+	if flushing then
+		-- the previous flush is still sending (it yields): a second one running beside it
+		-- could deliver a child before its parent, or an add before an older removal
+		task.delay(FLUSH_DELAY, flush)
+		return
+	end
 	flushScheduled = false
 	if not active then
 		return
 	end
+	flushing = true
+	local okFlush, flushErr = pcall(flushNow)
+	flushing = false
+	if not okFlush then
+		warn("[RoLink] mirror flush failed: " .. tostring(flushErr))
+	end
+end
+
+function flushNow()
 	local upserts, removed = {}, {}
 	local t0 = os.clock()
 	local function send()
@@ -295,7 +313,13 @@ local function onRemoving(inst)
 	if not active then
 		return
 	end
-	gone[inst] = Paths.id(inst)
+	-- no id means it was never sent: nothing to remove, and handing a leaving
+	-- (possibly destroyed) instance a new id would pin it in the id table
+	local id = Paths.peek(inst)
+	if id == nil then
+		return
+	end
+	gone[inst] = id
 	if not flushScheduled then
 		flushScheduled = true
 		task.delay(FLUSH_DELAY, flush)
@@ -484,21 +508,26 @@ local function applyAttrs(ctx, inst, attrs, remove)
 	end
 end
 
-local function setTags(inst, tags)
+local function setTags(ctx, inst, tags)
 	if not tags then
 		return
 	end
-	local want = {}
-	for _, t in tags do
-		want[t] = true
-		if not inst:HasTag(t) then
-			inst:AddTag(t)
+	local ok, err = pcall(function()
+		local want = {}
+		for _, t in tags do
+			want[t] = true
+			if not inst:HasTag(t) then
+				inst:AddTag(t)
+			end
 		end
-	end
-	for _, t in inst:GetTags() do
-		if not want[t] then
-			inst:RemoveTag(t)
+		for _, t in inst:GetTags() do
+			if not want[t] then
+				inst:RemoveTag(t)
+			end
 		end
+	end)
+	if not ok then
+		table.insert(ctx.errors, { where = inst:GetFullName() .. " tags", message = tostring(err) })
 	end
 end
 
@@ -589,7 +618,7 @@ local function doCreate(ctx, op)
 	end
 	applyProps(ctx, inst, op.props)
 	applyAttrs(ctx, inst, op.attrs)
-	setTags(inst, op.tags)
+	setTags(ctx, inst, op.tags)
 	local okP, err = pcall(function()
 		inst.Parent = parent
 	end)
@@ -618,11 +647,16 @@ local function doSet(ctx, op)
 	end
 	if op.parent ~= nil then
 		local p = byId(ctx, op.parent)
-		local ok, err = pcall(function()
-			inst.Parent = p
-		end)
-		if not (ok and p) then
-			table.insert(ctx.errors, { where = inst:GetFullName(), message = "could not move: " .. tostring(err) })
+		if not p then
+			-- assigning nil would take the instance out of the place
+			table.insert(ctx.errors, { where = inst:GetFullName(), message = "could not move: the new parent no longer exists" })
+		else
+			local ok, err = pcall(function()
+				inst.Parent = p
+			end)
+			if not ok then
+				table.insert(ctx.errors, { where = inst:GetFullName(), message = "could not move: " .. tostring(err) })
+			end
 		end
 	end
 	if op.source ~= nil then
@@ -633,7 +667,7 @@ local function doSet(ctx, op)
 	end
 	applyProps(ctx, inst, op.props)
 	applyAttrs(ctx, inst, op.attrs, op.attrsRemove)
-	setTags(inst, op.tags)
+	setTags(ctx, inst, op.tags)
 	table.insert(ctx.touched, inst)
 end
 
@@ -654,7 +688,13 @@ function Mirror.apply(args)
 		elseif op.op == "destroy" then
 			local inst = Paths.resolve(op.id)
 			if inst then
-				inst:Destroy()
+				-- a locked instance (a service, say) must not abort the rest of the batch
+				local ok, err = pcall(function()
+					inst:Destroy()
+				end)
+				if not ok then
+					table.insert(ctx.errors, { where = "#" .. tostring(op.id), message = "could not delete: " .. tostring(err) })
+				end
 			end
 		end
 	end

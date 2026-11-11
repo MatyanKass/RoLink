@@ -443,6 +443,7 @@ luauLib.load(fsLib.readFile("playtest.luau"), { debugName = "playtest" })(H)
 luauLib.load(fsLib.readFile("editor.luau"), { debugName = "editor" })(H)
 luauLib.load(fsLib.readFile("audit.luau"), { debugName = "audit" })(H)
 luauLib.load(fsLib.readFile("clientrelay.luau"), { debugName = "clientrelay" })(H)
+luauLib.load(fsLib.readFile("fixes.luau"), { debugName = "fixes" })(H)
 
 
 -------------------------------------------------------------------------------
@@ -828,6 +829,10 @@ do
 	end
 	function fakePlugin:SetSetting() end
 	run.PlayerRemoving = { Connect = function() end }
+	run.ChildAdded = { Connect = function() end }
+	function run:GetChildren()
+		return {}
+	end
 	local fakeRelay = { OnServerEvent = { Connect = function() end }, SetAttribute = function() end }
 
 	H.requireWith("Main.server", {

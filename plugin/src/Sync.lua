@@ -241,15 +241,17 @@ local function applyItem(item)
 		if inst and inst:GetAttribute("RoLinkHash") == item.hash then
 			return
 		end
-		if inst and (CollectionService:HasTag(inst, TAG) or item.adopt) then
-			inst:Destroy()
-		elseif inst then
+		if inst and not (CollectionService:HasTag(inst, TAG) or item.adopt) then
 			table.insert(stats.errors, table.concat(path, "/") .. " exists and is not synced; not replacing")
 			return
 		end
 		local spec = table.clone(item.spec)
 		spec.name = name
+		-- built before the old one goes, so a failed build leaves the old one in place
 		local res = Build.run(parent, { spec }, { origin = item.origin })
+		if inst then
+			inst:Destroy()
+		end
 		for _, w in res.warnings do
 			table.insert(stats.errors, w)
 		end
@@ -265,14 +267,16 @@ local function applyItem(item)
 		if inst and inst:GetAttribute("RoLinkHash") == item.hash then
 			return
 		end
-		if inst and CollectionService:HasTag(inst, TAG) then
-			inst:Destroy()
-		elseif inst then
+		if inst and not CollectionService:HasTag(inst, TAG) then
 			table.insert(stats.errors, table.concat(path, "/") .. " exists and is not synced; not replacing")
 			return
 		end
 		local SerializationService = game:GetService("SerializationService")
+		-- decoded before the old one goes, so a broken file leaves the old one in place
 		local list = SerializationService:DeserializeInstancesAsync(Util.base64Decode(item.rbxm))
+		if inst then
+			inst:Destroy()
+		end
 		local root = list[1]
 		if #list ~= 1 then
 			root = Instance.new("Model")
@@ -318,6 +322,16 @@ local function applyItem(item)
 	watch(inst)
 end
 
+-- One bad file (unknown class, broken .rbxm, failed build) is an error in the report,
+-- not the end of the whole sync.
+local function applyItemSafe(item)
+	local ok, err = pcall(applyItem, item)
+	if not ok then
+		local where = type(item) == "table" and type(item.path) == "table" and table.concat(item.path, "/") or "?"
+		table.insert(stats.errors, where .. ": " .. tostring(err))
+	end
+end
+
 --[[
 	args.action = "full"  : items = complete snapshot, roots = owned paths
 	args.action = "patch" : upsert = items, remove = paths
@@ -336,7 +350,7 @@ function Sync.apply(args)
 			keep[key(item.path)] = true
 		end
 		for _, item in args.items do
-			applyItem(item)
+			applyItemSafe(item)
 		end
 		-- remove synced instances whose file is gone
 		for _, inst in CollectionService:GetTagged(TAG) do
@@ -350,7 +364,7 @@ function Sync.apply(args)
 		return stats
 	end
 	for _, item in args.upsert or {} do
-		applyItem(item)
+		applyItemSafe(item)
 	end
 	for _, p in args.remove or {} do
 		local inst = resolve(p)

@@ -171,22 +171,31 @@ function Animation.preview(args)
 		animator.Parent = host
 	end
 
-	local track = animator:LoadAnimation(anim)
-	local seconds = math.min(tonumber(args.seconds) or track.Length, MAX_PREVIEW_SECONDS)
-	if seconds <= 0 then
-		seconds = 1
-	end
-	track:Play(0)
-	local dt = 1 / 30
+	-- preview is not an undo step: whatever happens, take the temporary Animator and the
+	-- posed joints back out, or they would be saved with the place
+	local track
 	local played = 0
-	while played < seconds do
-		animator:StepAnimations(dt)
-		task.wait(dt)
-		played += dt
-	end
-	track:Stop(0)
-	animator:StepAnimations(0)
-	track:Destroy()
+	local ok, err = pcall(function()
+		track = animator:LoadAnimation(anim)
+		local seconds = math.min(tonumber(args.seconds) or track.Length, MAX_PREVIEW_SECONDS)
+		if seconds <= 0 then
+			seconds = 1
+		end
+		track:Play(0)
+		local dt = 1 / 30
+		while played < seconds do
+			animator:StepAnimations(dt)
+			task.wait(dt)
+			played += dt
+		end
+	end)
+	pcall(function()
+		if track then
+			track:Stop(0)
+			animator:StepAnimations(0)
+			track:Destroy()
+		end
+	end)
 	anim:Destroy()
 	for _, d in rig:GetDescendants() do
 		if d:IsA("Motor6D") then
@@ -197,6 +206,9 @@ function Animation.preview(args)
 	end
 	if tempAnimator then
 		animator:Destroy()
+	end
+	if not ok then
+		error("animation preview failed: " .. tostring(err), 0)
 	end
 	return { id = id, temporary = true, seconds = played }
 end
